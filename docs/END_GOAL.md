@@ -195,3 +195,13 @@ The gate is blocked until the pilot clients exist (README, B-1).
 - Every result records the machine, the commit and the machine load
   (`uptime`); laptop numbers are development observations, never
   production capacity.
+
+## Release and upkeep
+
+From the guide: generation prompts, templates and component sets are
+versioned data, and every candidate records the versions it was built with;
+design regressions are tracked across template versions (visual snapshots
+plus the check suite); deploy-adapter compatibility is tested per release;
+imported-asset handling keeps its fixture tests; approved client facts are
+kept current (D-013); queued proposals are reviewed rather than forcing
+weekly edits.
