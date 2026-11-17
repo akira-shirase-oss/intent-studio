@@ -131,6 +131,8 @@ pub struct Config {
     pub rate_table_entries: usize,
     /// The notifier.
     pub notify: NotifyConfig,
+    /// A bearer token for `/metrics`; without it only direct requests from the host may read.
+    pub metrics_token: Option<Secret>,
     /// The operator's argon2id password hash (PHC string); operator sign-in is off without it.
     pub operator_password_hash: Option<Secret>,
     /// Operator session lifetime.
@@ -417,6 +419,14 @@ impl Config {
                 notify.concurrency, notify.db_connections
             ));
         }
+        let metrics_token = env.secret("INTENT_METRICS_TOKEN");
+        if metrics_token
+            .as_ref()
+            .is_some_and(|t| t.expose().len() < 16)
+        {
+            env.problems
+                .push("INTENT_METRICS_TOKEN: at least 16 characters".into());
+        }
         let operator_password_hash = env.secret("INTENT_OPERATOR_PASSWORD_HASH");
         if let Some(hash) = &operator_password_hash
             && !hash.expose().starts_with("$argon2id$")
@@ -474,6 +484,7 @@ impl Config {
                 address_quota,
                 rate_table_entries,
                 notify,
+                metrics_token,
                 operator_password_hash,
                 session_ttl,
                 session_idle,

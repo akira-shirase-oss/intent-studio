@@ -180,7 +180,32 @@ async fn readyz(State(app): State<App>) -> Response {
     }
 }
 
-async fn metrics(State(app): State<App>) -> Response {
+/// Whether this request may read `/metrics`: the token holder, or (with no token configured) a
+/// direct request from the host itself — not one that came through a proxy, which a local
+/// reverse proxy would otherwise turn into a public page.
+fn may_read_metrics(app: &App, peer: Peer, headers: &axum::http::HeaderMap) -> bool {
+    use sha2::{Digest as _, Sha256};
+    match &app.config.metrics_token {
+        Some(token) => headers
+            .get(header::AUTHORIZATION)
+            .and_then(|v| v.to_str().ok())
+            .and_then(|v| v.strip_prefix("Bearer "))
+            // Compare digests, not the strings: equal-length inputs, no early exit on the secret.
+            .is_some_and(|given| {
+                Sha256::digest(given.as_bytes()) == Sha256::digest(token.expose().as_bytes())
+            }),
+        None => peer.ip().is_loopback() && !headers.contains_key("x-forwarded-for"),
+    }
+}
+
+async fn metrics(
+    State(app): State<App>,
+    axum::extract::ConnectInfo(peer): axum::extract::ConnectInfo<Peer>,
+    headers: axum::http::HeaderMap,
+) -> Response {
+    if !may_read_metrics(&app, peer, &headers) {
+        return ApiError::NotFound.into_response();
+    }
     let in_flight = app
         .config
         .max_in_flight

@@ -476,6 +476,16 @@ starting values; changing one needs a measurement and a new entry.
   `config::tests::the_notifier_pool_is_sized_for_its_concurrency`, which
   failed before the change.
 
+- **D-049 — Who may read `/metrics`.** With `INTENT_METRICS_TOKEN` set
+  (16 characters or more), only `Authorization: Bearer <token>` reads it;
+  without one, only a direct request from the host itself (a loopback
+  peer with no `X-Forwarded-For`, so a local reverse proxy cannot turn it
+  into a public page). Everyone else gets a 404. The counters are not
+  personal data, but refusal and rate-limit counts tell an attacker how
+  the limits respond. Proven by
+  `intake::metrics_are_for_the_host_or_a_token_holder_only`, which failed
+  before the change.
+
 ## Open questions (still open)
 
 These need the maintainer or an outside party; each is in the README's

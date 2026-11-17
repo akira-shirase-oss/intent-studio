@@ -747,3 +747,56 @@ async fn the_consent_notice_version_is_required_and_stored_with_the_lead() {
     assert_eq!(refused.status, Some(422));
     db.drop_database().await;
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "needs the stack: scripts/stack.sh up (run by scripts/drills.sh)"]
+async fn metrics_are_for_the_host_or_a_token_holder_only() {
+    let db = TestDb::create(1).await;
+    let fixture = ProviderFixture::start(Mode::Ok).await;
+    let client = client();
+    let get = |server_base: String, xff: Option<&'static str>, bearer: Option<&'static str>| {
+        let client = client.clone();
+        async move {
+            let mut request = client.get(format!("{server_base}/metrics"));
+            if let Some(address) = xff {
+                request = request.header("x-forwarded-for", address);
+            }
+            if let Some(token) = bearer {
+                request = request.bearer_auth(token);
+            }
+            request.send().await.unwrap().status().as_u16()
+        }
+    };
+    // No token configured: the host itself may read; anything that came through a proxy may not.
+    let mut env = drill_env(&db, &fixture.url);
+    env.push(("INTENT_TRUSTED_PROXIES".into(), "127.0.0.1".into()));
+    let server = Server::start(env.clone()).await;
+    assert_eq!(get(server.base.clone(), None, None).await, 200);
+    assert_eq!(
+        get(server.base.clone(), Some("203.0.113.9"), None).await,
+        404
+    );
+    drop(server);
+    // A token configured: only its holder reads, even from the host.
+    env.push((
+        "INTENT_METRICS_TOKEN".into(),
+        "metrics-token-0123456789abcdef".into(),
+    ));
+    let server = Server::start(env).await;
+    assert_eq!(get(server.base.clone(), None, None).await, 404);
+    assert_eq!(
+        get(server.base.clone(), None, Some("wrong-token-0123456789")).await,
+        404
+    );
+    assert_eq!(
+        get(
+            server.base.clone(),
+            Some("203.0.113.9"),
+            Some("metrics-token-0123456789abcdef")
+        )
+        .await,
+        200
+    );
+    assert_no_leaks(&server.log(), &["metrics-token-0123456789abcdef"]);
+    db.drop_database().await;
+}
