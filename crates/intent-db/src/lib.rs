@@ -25,7 +25,7 @@ use sqlx::{
     postgres::{PgConnectOptions, PgPool, PgPoolOptions},
 };
 
-pub use inbox::{InboxLead, InboxQuery};
+pub use inbox::{AuditEntry, InboxLead, InboxQuery};
 pub use leads::{NewLead, StoreOutcome};
 pub use outbox::{AttemptRecord, ClaimedNotification, RecordResult};
 pub use reconcile::{OutboxTally, PrefixReport};

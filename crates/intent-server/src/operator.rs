@@ -14,7 +14,7 @@ use axum::{
     http::{HeaderMap, HeaderValue, StatusCode, header},
     response::{IntoResponse, Response},
 };
-use intent_db::{InboxLead, InboxQuery};
+use intent_db::{AuditEntry, InboxLead, InboxQuery};
 use intent_domain::{
     ids::{LeadId, SiteId},
     ratelimit::{AddressKey, RetryAfter},
@@ -29,8 +29,61 @@ use crate::{
     error::ApiError,
 };
 
-/// The session cookie's name.
-pub const COOKIE: &str = "intent_operator";
+/// The session cookie's name when it is `Secure`: the `__Host-` prefix makes browsers refuse
+/// it unless it is Secure, host-only and for `/`, so no sibling subdomain can set or shadow it.
+pub const COOKIE_SECURE: &str = "__Host-intent_operator";
+
+/// The cookie's name on plain-HTTP development servers (`INTENT_COOKIE_SECURE=false`), where a
+/// `__Host-` cookie would be refused by the browser.
+pub const COOKIE_PLAIN: &str = "intent_operator";
+
+fn cookie_name(app: &App) -> &'static str {
+    if app.config.cookie_secure {
+        COOKIE_SECURE
+    } else {
+        COOKIE_PLAIN
+    }
+}
+
+/// Who asked, for the audit: the client address and the request id.
+struct Caller {
+    address: String,
+    request_id: Option<String>,
+}
+
+impl Caller {
+    fn of(app: &App, peer: Peer, headers: &HeaderMap) -> Self {
+        let address =
+            crate::intake::client_address_of(headers, peer.ip(), &app.config.trusted_proxies);
+        let request_id = headers
+            .get(&crate::app::REQUEST_ID)
+            .and_then(|v| v.to_str().ok())
+            .map(str::to_owned);
+        Self {
+            address: address.to_string(),
+            request_id,
+        }
+    }
+
+    async fn audit(
+        &self,
+        app: &App,
+        action: &str,
+        actor: &str,
+        detail: &str,
+    ) -> Result<(), ApiError> {
+        app.db
+            .audit(&AuditEntry {
+                action,
+                actor,
+                address: Some(&self.address),
+                request_id: self.request_id.as_deref(),
+                detail,
+            })
+            .await
+            .map_err(ApiError::from)
+    }
+}
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -49,15 +102,21 @@ pub async fn sign_in(
     let Some(hash) = app.config.operator_password_hash.clone() else {
         return Err(ApiError::SignInDisabled);
     };
+    let caller = Caller::of(&app, peer, &headers);
     let address =
         crate::intake::client_address_of(&headers, peer.ip(), &app.config.trusted_proxies);
-    if let Err(RetryAfter(secs)) = app
-        .sign_in_limiter
-        .check(AddressKey::of(address), app.now_ms())
-    {
-        return Err(ApiError::RateLimited {
-            retry_after_secs: secs,
-        });
+    // Per address first, then everywhere together: guesses spread over many addresses are
+    // bounded too (D-041). The cost: during such an attack the operator may wait a minute.
+    let now = app.now_ms();
+    for check in [
+        app.sign_in_limiter.check(AddressKey::of(address), now),
+        app.sign_in_global.check(0, now),
+    ] {
+        if let Err(RetryAfter(secs)) = check {
+            return Err(ApiError::RateLimited {
+                retry_after_secs: secs,
+            });
+        }
     }
     // JSON only: a cross-site form cannot send it without a preflight.
     let is_json = headers
@@ -91,6 +150,9 @@ pub async fn sign_in(
     .map_err(|_| ApiError::Internal(anyhow::anyhow!("password check task failed")))?;
     if !verified {
         tracing::info!("operator sign-in refused");
+        caller
+            .audit(&app, "operator.sign_in_failed", "unknown", "{}")
+            .await?;
         return Err(ApiError::Unauthorized);
     }
 
@@ -98,7 +160,9 @@ pub async fn sign_in(
     app.db
         .create_session(&digest(&token), app.config.session_ttl)
         .await?;
-    app.db.audit("operator.sign_in", "{}").await?;
+    caller
+        .audit(&app, "operator.sign_in", "operator", "{}")
+        .await?;
     tracing::info!("operator signed in");
     let secure = if app.config.cookie_secure {
         "; Secure"
@@ -106,7 +170,8 @@ pub async fn sign_in(
         ""
     };
     let cookie = format!(
-        "{COOKIE}={token}; HttpOnly; SameSite=Strict; Path=/; Max-Age={}{secure}",
+        "{}={token}; HttpOnly; SameSite=Strict; Path=/; Max-Age={}{secure}",
+        cookie_name(&app),
         app.config.session_ttl.as_secs()
     );
     let mut response = (StatusCode::OK, Json(json!({ "signed_in": true }))).into_response();
@@ -124,13 +189,21 @@ pub async fn session(State(app): State<App>, headers: HeaderMap) -> Result<Respo
 
 /// `DELETE /v1/operator/session`.
 pub async fn sign_out(State(app): State<App>, headers: HeaderMap) -> Result<Response, ApiError> {
-    if let Some(token) = session_token(&headers) {
+    let name = cookie_name(&app);
+    if let Some(token) = session_token(&headers, name) {
         app.db.delete_session(&digest(token)).await?;
     }
+    let secure = if app.config.cookie_secure {
+        "; Secure"
+    } else {
+        ""
+    };
+    let clear = format!("{name}=; HttpOnly; SameSite=Strict; Path=/; Max-Age=0{secure}");
     let mut response = StatusCode::NO_CONTENT.into_response();
     response.headers_mut().insert(
         header::SET_COOKIE,
-        HeaderValue::from_static("intent_operator=; HttpOnly; SameSite=Strict; Path=/; Max-Age=0"),
+        HeaderValue::from_str(&clear)
+            .map_err(|_| ApiError::Internal(anyhow::anyhow!("cookie is not a header value")))?,
     );
     Ok(response)
 }
@@ -146,6 +219,7 @@ pub struct InboxParams {
 /// `GET /v1/operator/leads?site=&before=&limit=`: newest first, at most 200 per page.
 pub async fn inbox(
     State(app): State<App>,
+    ConnectInfo(peer): ConnectInfo<Peer>,
     headers: HeaderMap,
     params: Result<Query<InboxParams>, QueryRejection>,
 ) -> Result<Response, ApiError> {
@@ -171,7 +245,9 @@ pub async fn inbox(
         })
         .await?;
     let detail = json!({ "site": site, "rows": leads.len() }).to_string();
-    app.db.audit("operator.inbox_read", &detail).await?;
+    Caller::of(&app, peer, &headers)
+        .audit(&app, "operator.inbox_read", "operator", &detail)
+        .await?;
     let next_before = (leads.len() == usize::from(limit))
         .then(|| leads.last().map(|l| l.id))
         .flatten();
@@ -216,12 +292,16 @@ fn no_store(mut response: Response) -> Response {
     response
 }
 
-/// 401 unless the request carries a live operator session.
+/// 401 unless the request carries a live operator session (not expired, not idle too long).
 async fn require_operator(app: &App, headers: &HeaderMap) -> Result<(), ApiError> {
-    let Some(token) = session_token(headers) else {
+    let Some(token) = session_token(headers, cookie_name(app)) else {
         return Err(ApiError::Unauthorized);
     };
-    if app.db.session_is_valid(&digest(token)).await? {
+    if app
+        .db
+        .session_is_valid(&digest(token), app.config.session_idle)
+        .await?
+    {
         Ok(())
     } else {
         Err(ApiError::Unauthorized)
@@ -229,14 +309,14 @@ async fn require_operator(app: &App, headers: &HeaderMap) -> Result<(), ApiError
 }
 
 /// The session token from the `Cookie` header, if it is shaped like one (64 hex digits).
-fn session_token(headers: &HeaderMap) -> Option<&str> {
+fn session_token<'h>(headers: &'h HeaderMap, cookie: &str) -> Option<&'h str> {
     headers
         .get_all(header::COOKIE)
         .iter()
         .filter_map(|v| v.to_str().ok())
         .flat_map(|v| v.split(';'))
         .filter_map(|pair| pair.trim().split_once('='))
-        .find(|(name, _)| *name == COOKIE)
+        .find(|(name, _)| *name == cookie)
         .map(|(_, value)| value)
         .filter(|v| v.len() == 64 && v.bytes().all(|b| b.is_ascii_hexdigit()))
 }
@@ -272,14 +352,19 @@ mod tests {
         let mut headers = HeaderMap::new();
         headers.insert(
             header::COOKIE,
-            HeaderValue::from_str(&format!("other=1; {COOKIE}={token}")).unwrap(),
+            HeaderValue::from_str(&format!("other=1; {COOKIE_SECURE}={token}")).unwrap(),
         );
-        assert_eq!(session_token(&headers), Some(token.as_str()));
+        assert_eq!(session_token(&headers, COOKIE_SECURE), Some(token.as_str()));
+        assert_eq!(
+            session_token(&headers, COOKIE_PLAIN),
+            None,
+            "names are not interchangeable"
+        );
         let mut bad = HeaderMap::new();
         bad.insert(
             header::COOKIE,
             HeaderValue::from_static("intent_operator=short"),
         );
-        assert_eq!(session_token(&bad), None);
+        assert_eq!(session_token(&bad, COOKIE_PLAIN), None);
     }
 }

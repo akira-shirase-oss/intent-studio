@@ -392,6 +392,21 @@ starting values; changing one needs a measurement and a new entry.
   and `a_row_with_no_attempt_left_and_no_lease_is_swept_dead`, both
   failing before the change.
 
+- **D-041 — Operator sign-in, hardened.** On top of D-036: a global
+  budget of 20 sign-in attempts a minute from all addresses together (so
+  guesses spread over many addresses are bounded; the cost is that during
+  such an attack the operator may wait a minute); an audit row for every
+  failed attempt as well as every success and inbox read, each with the
+  actor (`operator` or `unknown`), the client address and the request id;
+  the session cookie named `__Host-intent_operator` whenever it is
+  `Secure` (browsers then refuse it unless Secure, host-only and for `/`;
+  plain-HTTP development servers keep the unprefixed name, which a browser
+  would otherwise drop); and a 30-minute idle timeout inside the 12-hour
+  lifetime, the session checked and touched in one statement. Proven by
+  `operator::sign_in_is_audited_uses_a_host_cookie_and_expires_when_idle`
+  and `sign_in_has_a_global_budget_beyond_the_per_address_one`, both
+  failing before the change.
+
 ## Open questions (still open)
 
 These need the maintainer or an outside party; each is in the README's

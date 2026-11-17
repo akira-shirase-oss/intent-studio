@@ -74,6 +74,21 @@ impl std::fmt::Debug for InboxLead {
     }
 }
 
+/// One audit row.
+#[derive(Debug, Clone, Copy)]
+pub struct AuditEntry<'a> {
+    /// What happened, e.g. `operator.inbox_read`.
+    pub action: &'a str,
+    /// Who: `operator`, or `unknown` for a failed sign-in.
+    pub actor: &'a str,
+    /// The client address the request came from.
+    pub address: Option<&'a str>,
+    /// The request id (`x-request-id`), to find the request in the logs.
+    pub request_id: Option<&'a str>,
+    /// JSON with ids and counts, never content.
+    pub detail: &'a str,
+}
+
 const PAGE: &str = r"
 SELECT l.id, l.tenant_id, l.site_id, s.name AS site_name, l.received_at, l.retain_until,
        l.name, l.email, l.phone, l.service, l.area, l.message, l.is_test,
@@ -135,14 +150,21 @@ impl Db {
             .map_err(DbError::Other)
     }
 
-    /// Records a cross-tenant operator action (D-015). `detail` is JSON with ids and counts only.
-    pub async fn audit(&self, action: &str, detail: &str) -> Result<(), DbError> {
-        sqlx::query("INSERT INTO operator_audit (action, detail) VALUES ($1, $2::jsonb)")
-            .bind(action)
-            .bind(detail)
-            .execute(&self.pool)
-            .await
-            .map(|_| ())
-            .map_err(classify)
+    /// Records an operator action (D-015): every cross-tenant read, every sign-in and every
+    /// failed one. `detail` is JSON with ids and counts only.
+    pub async fn audit(&self, entry: &AuditEntry<'_>) -> Result<(), DbError> {
+        sqlx::query(
+            "INSERT INTO operator_audit (action, actor, address, request_id, detail)
+             VALUES ($1, $2, $3, $4, $5::jsonb)",
+        )
+        .bind(entry.action)
+        .bind(entry.actor)
+        .bind(entry.address)
+        .bind(entry.request_id)
+        .bind(entry.detail)
+        .execute(&self.pool)
+        .await
+        .map(|_| ())
+        .map_err(classify)
     }
 }

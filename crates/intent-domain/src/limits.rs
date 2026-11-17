@@ -53,3 +53,10 @@ pub const NOTIFY_RETRY_CAP_FACTOR: u32 = 360;
 
 /// Each retry delay's ceiling grows by this factor per attempt (D-030).
 pub const NOTIFY_RETRY_GROWTH: u32 = 4;
+
+/// Operator sign-in attempts per minute from one address (D-036).
+pub const SIGN_IN_PER_ADDRESS_PER_MINUTE: u32 = 5;
+
+/// Operator sign-in attempts per minute from everywhere together, so guesses spread over many
+/// addresses are bounded too (D-041).
+pub const SIGN_IN_GLOBAL_PER_MINUTE: u32 = 20;

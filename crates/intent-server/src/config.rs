@@ -111,6 +111,8 @@ pub struct Config {
     pub operator_password_hash: Option<Secret>,
     /// Operator session lifetime.
     pub session_ttl: Duration,
+    /// An operator session unused for this long is over.
+    pub session_idle: Duration,
     /// Mark the session cookie `Secure`.
     pub cookie_secure: bool,
     /// The built workspace app, served at `/workspace`.
@@ -377,6 +379,8 @@ impl Config {
             12 * 3600,
             60..=7 * 24 * 3600,
         ));
+        let session_idle =
+            Duration::from_secs(env.ranged("INTENT_SESSION_IDLE_SECS", 30 * 60, 1..=24 * 3600));
         let cookie_secure = env.parse("INTENT_COOKIE_SECURE", true);
         let workspace_dir = env.raw("INTENT_WORKSPACE_DIR").map(PathBuf::from);
         let log_format = match env.raw("INTENT_LOG_FORMAT").as_deref() {
@@ -420,6 +424,7 @@ impl Config {
                 notify,
                 operator_password_hash,
                 session_ttl,
+                session_idle,
                 cookie_secure,
                 workspace_dir,
                 log_format,
