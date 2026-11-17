@@ -3,8 +3,9 @@
 Deliberate choices, newest last. D-NNN numbering follows the workspace
 convention. D-001–D-009 seed the contract's prescribed directions;
 D-010–D-029 were decided before any code to close the questions that
-blocked milestone 0 and to fix gaps a plan review found; D-030–D-037 were
-made while building I0. Where something
+blocked milestone 0 and to fix gaps a plan review found; D-030–D-053 were
+made while building I0, and D-054 onward while closing I0 and building I1.
+Where something
 still needs the maintainer or an outside party, it is listed under *Open
 questions (still open)* and in the README's *Blocked on* table.
 
@@ -541,6 +542,43 @@ starting values; changing one needs a measurement and a new entry.
   prefix (/48) would also group unrelated users behind one provider's
   allocation, and lowering 64 would hurt clients behind carrier-grade
   NAT. Listed under the open questions until a measurement decides it.
+
+## Decisions made while closing I0 and building I1 (2026-11-17)
+
+- **D-054 — The intake budget, set from the quiet-machine baselines.** Failure
+  case 3 asks for "intake p99 within the budget set from the I0 baseline";
+  until now the 100 ms p99 in every run was a proposal. The baselines, each
+  started below load average 6 (`perf/results/README.md`): realism (50/s)
+  p99 14.7 ms at `bd8d4e6`; burst (250/s) p99 89.9 ms at `c405dce`, logged
+  at debug while other builds pushed the load to 14.75 before it ended;
+  `notify-down` (100,000 at 500/s) p99 5.4 ms and the full run (1,000,000
+  at 500/s) p99 12.1 ms, p99.9 88 ms, both at `e61d0c2`. The budgets
+  (`scripts/load.sh` sets them per scenario; `perf/k6/leads.js` enforces
+  them as thresholds):
+
+  | Scenario | p99 | p99.9 | Headroom over the baseline |
+  |---|---|---|---|
+  | realism, 50/s | 50 ms | — | 3.4× the 14.7 ms p99 |
+  | burst, 250/s | 200 ms | — | 2.2× the 89.9 ms p99 |
+  | `notify-down` and full, 500/s, provider down | 100 ms | 250 ms | 8.3× the 12.1 ms p99; 2.8× the 88 ms p99.9 |
+
+  The other pass conditions are unchanged: acknowledged rate above 99.9%,
+  dropped iterations below 0.01% of the run, zero reconciliation
+  violations, zero log lines with lead content, outbox = provider. Why
+  these numbers: the budget's job is to catch a regression, not to
+  flatter a laptop. The busy-machine misses it must catch were 109 ms to
+  402 ms at p99 (pool starvation and scheduler contention), and the quiet
+  runs vary by about 6× between scenarios, so a budget at 2–3× the worst
+  quiet baseline of each scenario flags those failures without failing on
+  ordinary laptop noise. Burst gets the widest absolute allowance because
+  its baseline is the noisiest (debug logging, load rising mid-run) and it
+  deliberately queues at 5× the guide's rate; it keeps at least 2×. A
+  visitor does not perceive any of these: the budget is a regression
+  line, not a user-experience target. Every recorded quiet run already
+  meets its budget, so no run was repeated to pass it. Cost: a budget at
+  2–3× a laptop baseline says nothing about production capacity — the
+  results stay development observations (D-025), and a production host is
+  measured on its own.
 
 ## Open questions (still open)
 

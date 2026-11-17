@@ -12,7 +12,8 @@
 //   SITES      demo sites seeded        (10000)
 //   RATE       submissions per second   (50)
 //   TOTAL      submissions in the run   (RATE * 60)
-//   P99_MS     http_req_duration p99 threshold in ms   (100)
+//   P99_MS     http_req_duration p99 threshold in ms   (100; scripts/load.sh sets D-054's budget)
+//   P999_MS    http_req_duration p99.9 threshold in ms (0: none)
 //   SUMMARY    where handleSummary writes the k6 summary JSON
 
 import http from 'k6/http';
@@ -25,6 +26,7 @@ const SITES = Number(__ENV.SITES || 10000);
 const RATE = Number(__ENV.RATE || 50);
 const TOTAL = Number(__ENV.TOTAL || RATE * 60);
 const P99_MS = Number(__ENV.P99_MS || 100);
+const P999_MS = Number(__ENV.P999_MS || 0);
 const DURATION_S = Math.ceil(TOTAL / RATE);
 const MAX_DROPPED = Math.max(1, Math.floor(TOTAL * 0.0001));
 
@@ -49,7 +51,7 @@ export const options = {
 		}
 	},
 	thresholds: {
-		http_req_duration: [`p(99)<${P99_MS}`],
+		http_req_duration: [`p(99)<${P99_MS}`, ...(P999_MS > 0 ? [`p(99.9)<${P999_MS}`] : [])],
 		lead_acknowledged: ['rate>0.999'],
 		dropped_iterations: [`count<${MAX_DROPPED}`]
 	},

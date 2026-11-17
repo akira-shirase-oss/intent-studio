@@ -26,14 +26,15 @@ latency threshold missed on a busy machine is kept as a miss, not rerun until gr
 | 2026-11-17 | notify-down (500/s, 100,000), after the fix rounds | 100,001 (0 dropped) | 500.0/s | e61d0c2 | 4.76 (6.46 after) | 100% / 0 violations; 95,001 leads stored once; 95,001 rows delivered = 95,001 provider acceptances, 0 duplicates, 0 dead | 1.6 ms / 5.4 ms | held (p99 < 100 ms, ack rate > 99.9%, 0 dropped) |
 | 2026-11-17 | **full (500/s, 1,000,000)** | 1,000,001 (0 dropped) | 500.0/s | e61d0c2 | 3.17 (8.61 after: other work during the run) | 99.9999% (1 unanswered, not acknowledged) / 0 violations; 950,000 leads stored once; 594,803 delivered = 594,803 provider acceptances, 0 duplicates; 355,197 dead after 8 attempts (provider down the whole 33 min at the 1/60 retry scale) | 1.9 ms / 12.1 ms (p99.9 88 ms) | held (p99 < 100 ms, ack rate > 99.9%, 0 dropped) |
 
+## Budgets
+
+The intake budgets are D-054, set from the quiet runs above and enforced as k6 thresholds by
+`scripts/load.sh`: realism p99 < 50 ms; burst p99 < 200 ms; `notify-down` and full p99 < 100 ms
+and p99.9 < 250 ms; always an acknowledged rate above 99.9%, dropped iterations below 0.01%,
+zero reconciliation violations and zero log lines with lead content. Runs made before D-054 were
+judged against the then-proposed 100 ms p99 (their files say so); every quiet run meets its
+D-054 budget.
+
 ## Owed
 
-- **The I0 intake budget, in a decision entry.** Both baseline runs now have a start below
-  load average 6 (realism 4.73, p99 14.7 ms; burst 4.51, p99 89.9 ms, debug logging on); the
-  budget (END_GOAL failure case 3) is still to be set from them. Until then the 100 ms p99
-  threshold is a proposal.
-- **The 100,000-submission `notify-down` smoke against that budget.** Its correctness held on
-  2026-11-17 (every acknowledged lead stored once, nothing lost or duplicated, every
-  notification delivered after recovery); its latency was measured on a busy machine only.
-- **The 1,000,000-submission run** (`scripts/load.sh full`, ROADMAP I3; the workspace
-  standard), only on a quiet machine, at the highest rate that holds the budget.
+- Nothing for I0. The ship gate (I6) re-runs the full run on the release commit.

@@ -14,7 +14,7 @@
 # after 8 attempts. The result — machine, commit, `uptime` before and after, k6 metrics, the
 # verdict — is written to perf/results/ whether it passed or not (misses are kept).
 #
-# Overrides: RATE, TOTAL, P99_MS, SITES, RETRY_BASE_MS (default 1000: the D-030 schedule at 1/60
+# Overrides: RATE, TOTAL, P99_MS, P999_MS (0: no p99.9 threshold), SITES, RETRY_BASE_MS (default 1000: the D-030 schedule at 1/60
 # scale, so a run sees the whole shape in minutes), DRAIN_TIMEOUT_S, K6, KEEP_DB (keep the run's
 # database instead of dropping it).
 set -euo pipefail
@@ -22,10 +22,11 @@ cd "$(dirname "$0")/.."
 
 scenario="${1:-}"
 case "$scenario" in
-    realism) : "${RATE:=50}" "${TOTAL:=3000}" "${P99_MS:=100}" ;;
-    burst) : "${RATE:=250}" "${TOTAL:=15000}" "${P99_MS:=100}" ;;
-    notify-down) : "${RATE:=500}" "${TOTAL:=100000}" "${P99_MS:=100}" ;;
-    full) : "${RATE:?set RATE for the full run}" "${TOTAL:=1000000}" "${P99_MS:=100}" ;;
+    # The intake budgets of D-054, set from the quiet-machine baselines.
+    realism) : "${RATE:=50}" "${TOTAL:=3000}" "${P99_MS:=50}" "${P999_MS:=0}" ;;
+    burst) : "${RATE:=250}" "${TOTAL:=15000}" "${P99_MS:=200}" "${P999_MS:=0}" ;;
+    notify-down) : "${RATE:=500}" "${TOTAL:=100000}" "${P99_MS:=100}" "${P999_MS:=250}" ;;
+    full) : "${RATE:?set RATE for the full run}" "${TOTAL:=1000000}" "${P99_MS:=100}" "${P999_MS:=250}" ;;
     *) echo "usage: scripts/load.sh realism|burst|notify-down|full" >&2; exit 2 ;;
 esac
 : "${SITES:=10000}" "${RETRY_BASE_MS:=1000}" "${DRAIN_TIMEOUT_S:=1800}"
@@ -80,7 +81,7 @@ started="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 set +e
 "$k6" run --quiet --console-output "$work/acks.log" \
     -e BASE_URL="http://127.0.0.1:$port" -e RUN="$run" -e SITES="$SITES" -e RATE="$RATE" \
-    -e TOTAL="$TOTAL" -e P99_MS="$P99_MS" -e SUMMARY="$work/k6-summary.json" \
+    -e TOTAL="$TOTAL" -e P99_MS="$P99_MS" -e P999_MS="$P999_MS" -e SUMMARY="$work/k6-summary.json" \
     perf/k6/leads.js
 k6_status=$?
 set -e
@@ -138,7 +139,7 @@ jq -n \
     --arg scenario "$scenario" --arg run "$run" --arg started "$started" --arg commit "$commit" \
     --arg machine "$machine" --arg uptime_before "$uptime_before" --arg uptime_after "$uptime_after" \
     --arg pass "$pass" --argjson k6_status "$k6_status" --argjson reconcile_status "$reconcile_status" \
-    --argjson rate "$RATE" --argjson total "$TOTAL" --argjson p99_ms "$P99_MS" --argjson sites "$SITES" \
+    --argjson rate "$RATE" --argjson total "$TOTAL" --argjson p99_ms "$P99_MS" --argjson p999_ms "$P999_MS" --argjson sites "$SITES" \
     --argjson retry_base_ms "$RETRY_BASE_MS" --argjson drain_seconds "$drain_seconds" \
     --argjson leaks "$leaks" --arg crosscheck "$crosscheck" --arg database "$db" \
     --arg log_level "$LOG_LEVEL" --argjson log_lines "$log_lines" \
@@ -156,7 +157,7 @@ jq -n \
       scenario: $scenario, run: $run, started: $started, commit: $commit, machine: $machine,
       uptime_before: $uptime_before, uptime_after: $uptime_after,
       note: "Development observation on a shared laptop, not production capacity. The load generator, the server and Postgres (Docker) share the machine.",
-      config: { rate_per_s: $rate, total: $total, p99_threshold_ms: $p99_ms, sites: $sites,
+      config: { rate_per_s: $rate, total: $total, p99_threshold_ms: $p99_ms, p999_threshold_ms: $p999_ms, budget: "D-054", sites: $sites,
                 provider: "fixture refusing with 503 for the whole run", resubmissions: "every 20th (5%)",
                 retry_base_ms: $retry_base_ms, db_connections: 32 },
       pass: ($pass == "yes"), k6_exit: $k6_status, reconcile_exit: $reconcile_status,

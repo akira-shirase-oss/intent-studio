@@ -1,9 +1,10 @@
 # Intent Studio
 
-> **Status — I0 (the lead-intake spine) built and drilled in CI; its
-> quiet-machine load baseline and the full 1,000,000-submission run are
-> owed; ship gate blocked on pilot clients.** See `docs/ROADMAP.md` (I0
-> status) for exactly what is proven and what is not. The hand-built
+> **Status — I0 (the lead-intake spine) done: drilled in CI, quiet-machine
+> baselines and the 1,000,000-submission provider-down run committed, the
+> intake budget set (D-054). I1 (brief, facts and components) in progress;
+> ship gate blocked on pilot clients.** See `docs/ROADMAP.md` for exactly
+> what is proven and what is not. The hand-built
 > component set needs the site category, and the ship gate needs three real
 > pilot clients; neither exists yet (see *Blocked on*).
 
