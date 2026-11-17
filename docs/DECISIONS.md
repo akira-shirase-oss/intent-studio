@@ -466,6 +466,16 @@ starting values; changing one needs a measurement and a new entry.
   `readiness::readiness_stays_green_while_intakes_pool_is_saturated`
   (red 18 times in 3 s before the change, 0 after).
 
+- **D-048 — The notifier's pool fits its concurrency.** D-034's pool of
+  4 connections served 32 concurrent attempts with intake's 1-second
+  acquire timeout; in the 100,000-submission run, recording results timed
+  out waiting for a connection. The notifier pool now defaults to 8
+  connections with a 5-second acquire timeout (a background record can
+  wait where a visitor should not), and a configuration with more than 8
+  attempts in flight per notifier connection is refused. Proven by
+  `config::tests::the_notifier_pool_is_sized_for_its_concurrency`, which
+  failed before the change.
+
 ## Open questions (still open)
 
 These need the maintainer or an outside party; each is in the README's

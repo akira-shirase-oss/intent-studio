@@ -62,10 +62,7 @@ pub async fn run(config: Config) -> anyhow::Result<ShutdownOutcome> {
     // The notifier gets a pool of its own, so a backlog of retries never queues intake behind it.
     let notifier_db = Db::connect_lazy(
         config.database_url.expose(),
-        intent_db::PoolLimits {
-            max_connections: config.notify.db_connections,
-            ..config.db
-        },
+        config.notify.pool_limits(config.db),
     )
     .map_err(|e| anyhow::anyhow!("INTENT_DATABASE_URL: {}", e.summary()))?;
     let provider = provider(&config.notify)?;

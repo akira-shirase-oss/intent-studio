@@ -178,7 +178,7 @@ impl Notifier {
                 Ok(RecordResult::Applied) => return,
                 Ok(RecordResult::LeaseLost) => {
                     Metrics::inc(&metrics.notify_lease_lost_total);
-                    tracing::warn!(outbox_id = %row.id, "attempt result discarded: the lease had expired");
+                    tracing::warn!(outbox_id = %row.id, attempt = row.attempt, "attempt result discarded: the row was claimed again after this attempt's lease expired");
                     return;
                 }
                 Err(error) => {

@@ -90,6 +90,18 @@ pub struct NotifyConfig {
     pub db_connections: u32,
 }
 
+impl NotifyConfig {
+    /// The notifier pool's limits: its own size, and a longer wait for a connection than
+    /// intake's, because a background record can wait where a visitor should not.
+    pub fn pool_limits(&self, intake: intent_db::PoolLimits) -> intent_db::PoolLimits {
+        intent_db::PoolLimits {
+            max_connections: self.db_connections,
+            acquire_timeout: Duration::from_secs(5),
+            ..intake
+        }
+    }
+}
+
 /// The whole configuration.
 #[derive(Debug, Clone)]
 pub struct Config {
@@ -393,10 +405,18 @@ impl Config {
                 Duration::from_millis(250),
                 10..=60_000,
             ),
-            db_connections: u32::try_from(env.ranged("INTENT_NOTIFY_DB_CONNECTIONS", 4, 1..=100))
-                .unwrap_or(4),
+            db_connections: u32::try_from(env.ranged("INTENT_NOTIFY_DB_CONNECTIONS", 8, 1..=100))
+                .unwrap_or(8),
         };
 
+        // Each attempt needs a connection to claim and to record; more than eight attempts per
+        // connection and the records queue for the pool (D-034).
+        if notify.concurrency > 8 * notify.db_connections as usize {
+            env.problems.push(format!(
+                "INTENT_NOTIFY_CONCURRENCY ({}) is more than 8 attempts per notifier connection (INTENT_NOTIFY_DB_CONNECTIONS = {})",
+                notify.concurrency, notify.db_connections
+            ));
+        }
         let operator_password_hash = env.secret("INTENT_OPERATOR_PASSWORD_HASH");
         if let Some(hash) = &operator_password_hash
             && !hash.expose().starts_with("$argon2id$")
@@ -499,6 +519,22 @@ mod tests {
         ("INTENT_NOTIFY_PROVIDER", "recorder"),
         ("INTENT_PROFILE", "development"),
     ];
+
+    #[test]
+    fn the_notifier_pool_is_sized_for_its_concurrency() {
+        let defaults = config(&MINIMAL).unwrap();
+        assert!(
+            defaults.notify.concurrency <= 8 * defaults.notify.db_connections as usize,
+            "default concurrency {} on {} connections",
+            defaults.notify.concurrency,
+            defaults.notify.db_connections
+        );
+        let mut starved = MINIMAL.to_vec();
+        starved.push(("INTENT_NOTIFY_CONCURRENCY", "64"));
+        starved.push(("INTENT_NOTIFY_DB_CONNECTIONS", "2"));
+        let text = config(&starved).unwrap_err().to_string();
+        assert!(text.contains("INTENT_NOTIFY_CONCURRENCY"), "{text}");
+    }
 
     #[test]
     fn the_recorder_is_refused_outside_development() {
