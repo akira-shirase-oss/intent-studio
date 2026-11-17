@@ -8,8 +8,8 @@
 
 use axum::{
     Json,
-    body::Bytes,
-    extract::{ConnectInfo, Path, State, rejection::BytesRejection},
+    body::{Body, Bytes},
+    extract::{ConnectInfo, Path, State},
     http::{HeaderMap, StatusCode, header},
     response::{IntoResponse, Response},
 };
@@ -17,6 +17,7 @@ use intent_db::{NewLead, StoreOutcome};
 use intent_domain::{
     ids::{LeadId, OutboxId, SiteId},
     lead::{LeadForm, Rejection},
+    limits::MAX_BODY_BYTES,
     ratelimit::{AddressKey, RetryAfter, client_address},
     submission::{fingerprint, keys_for},
 };
@@ -49,7 +50,9 @@ pub async fn submit(
     ConnectInfo(peer): ConnectInfo<Peer>,
     Path(site): Path<String>,
     headers: HeaderMap,
-    body: Result<Bytes, BytesRejection>,
+    // Not read by an extractor: the body is read only after the cheap refusals below, so a
+    // client that is shed or over its limit never gets the server to wait for its bytes.
+    body: Body,
 ) -> Result<Response, ApiError> {
     let metrics = &app.metrics;
     let Ok(_permit) = app.gate.clone().try_acquire_owned() else {
@@ -78,13 +81,7 @@ pub async fn submit(
         });
     }
 
-    let body = body.map_err(|rejection| {
-        if rejection.status() == StatusCode::PAYLOAD_TOO_LARGE {
-            ApiError::PayloadTooLarge
-        } else {
-            ApiError::MalformedBody
-        }
-    })?;
+    let body = read_body(body).await?;
     let form =
         parse(&headers, &body).inspect_err(|_| Metrics::inc(&metrics.intake_invalid_total))?;
     let lead = form.validate().map_err(|rejection| match rejection {
@@ -173,6 +170,22 @@ fn acknowledge(
         header::HeaderValue::from_static("no-store"),
     );
     response
+}
+
+/// Reads a request body of at most [`MAX_BODY_BYTES`]; the request timeout bounds how long.
+pub async fn read_body(body: Body) -> Result<Bytes, ApiError> {
+    axum::body::to_bytes(body, MAX_BODY_BYTES)
+        .await
+        .map_err(|error| {
+            let mut cause: Option<&(dyn std::error::Error + 'static)> = Some(&error);
+            while let Some(current) = cause {
+                if current.is::<http_body_util::LengthLimitError>() {
+                    return ApiError::PayloadTooLarge;
+                }
+                cause = current.source();
+            }
+            ApiError::MalformedBody
+        })
 }
 
 /// JSON or a no-script form post. Parse errors are never echoed: serde messages can quote input.

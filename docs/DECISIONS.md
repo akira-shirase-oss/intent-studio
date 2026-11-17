@@ -351,6 +351,23 @@ starting values; changing one needs a measurement and a new entry.
   rows delivered through its own recorder, which only that cross-check
   could have caught. The run is kept in `perf/results/`, marked invalid.
 
+- **D-038 — Connection bounds, and no body read before the cheap
+  refusals.** `axum::serve` exposes no connection settings, so the server
+  drives hyper's HTTP/1 connection itself: at most 1,024 connections open
+  (a permit is taken before `accept`, so excess connections wait in the
+  kernel backlog instead of costing a descriptor and a task); a 10 s
+  header-read timeout that also closes idle keep-alive sockets (hyper's
+  timer runs whenever a connection waits for a request head); a 10 s
+  write-stall deadline for clients that stop reading. Intake and operator
+  sign-in take the body unread and read it (16 KiB cap, request timeout)
+  only after the shed gate and the rate limits, so a refused client never
+  makes the server wait for its bytes. Proven by
+  `connections::slow_headers_and_idle_sockets_are_closed`,
+  `open_connections_are_capped`,
+  `a_client_over_its_limit_is_refused_before_its_body_is_read` and
+  `a_client_that_stops_reading_is_cut_off`, each failing before the
+  change. Cost: a client may keep a connection idle for at most 10 s.
+
 ## Open questions (still open)
 
 These need the maintainer or an outside party; each is in the README's

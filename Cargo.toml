@@ -28,6 +28,11 @@ fastrand = "2.4"
 # Bounded least-recently-used tables for the rate limiter (already in the graph through sqlx).
 hashlink = "0.11"
 hex = "0.4.3"
+http-body-util = "0.1.5"
+# Driven directly for connection-level bounds (header-read timeout, connection cap); axum::serve
+# exposes none of them.
+hyper = { version = "1.12", features = ["server", "http1"] }
+hyper-util = { version = "0.1.21", features = ["tokio", "service"] }
 # Plain HTTP only in I0: the provider fixture is local. TLS (rustls) arrives with the first
 # real provider adapter, so no TLS stack is compiled before something needs it.
 reqwest = { version = "0.13.5", default-features = false, features = ["json"] }

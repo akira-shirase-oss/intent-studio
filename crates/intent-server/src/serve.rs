@@ -16,7 +16,7 @@ use tokio::net::TcpListener;
 use tokio_util::{sync::CancellationToken, task::TaskTracker};
 
 use crate::{
-    app::{self, App, Peer},
+    app::{self, App},
     config::{Config, NotifyConfig, ProviderConfig},
     health::{Health, run_prober},
     notifier::Notifier,
@@ -93,38 +93,34 @@ pub async fn run(config: Config) -> anyhow::Result<ShutdownOutcome> {
         .run(cancel.clone()),
     );
 
+    let app_connections = app.connections.clone();
     let router = app::router(app);
     let address = listener.local_addr().context("reading the bound address")?;
     tracing::info!(%address, "listening");
     health.mark_ready();
 
-    let (triggered_tx, triggered_rx) = tokio::sync::oneshot::channel::<()>();
-    let drain_health = health.clone();
-    let drain_delay = config.drain_delay;
-    let stop_accepting = async move {
-        signal.await;
-        tracing::info!("shutdown signal received: readiness is now false");
-        let _ = triggered_tx.send(());
-        drain_health.begin_drain();
-        tokio::time::sleep(drain_delay).await;
-        tracing::info!("drain delay over: no new connections");
-    };
-    let server = axum::serve(
+    let stop = CancellationToken::new();
+    let accepting = tokio::spawn(crate::conn::serve(
         listener,
-        router.into_make_service_with_connect_info::<Peer>(),
-    )
-    .with_graceful_shutdown(stop_accepting)
-    .into_future();
-    let grace = config.shutdown_grace;
-    let hard_deadline = async move {
-        if triggered_rx.await.is_err() {
-            std::future::pending::<()>().await;
-        }
-        tokio::time::sleep(drain_delay + grace).await;
-    };
-    let outcome = tokio::select! {
-        result = server => { result.context("serving")?; ShutdownOutcome::Graceful }
-        () = hard_deadline => ShutdownOutcome::DeadlineExceeded,
+        router,
+        config.connections,
+        app_connections,
+        stop.clone(),
+    ));
+    signal.await;
+    tracing::info!("shutdown signal received: readiness is now false");
+    health.begin_drain();
+    tokio::time::sleep(config.drain_delay).await;
+    tracing::info!("drain delay over: no new connections");
+    stop.cancel();
+    let connections = accepting.await.context("the accept loop failed")?;
+    let outcome = if tokio::time::timeout(config.shutdown_grace, connections.wait())
+        .await
+        .is_ok()
+    {
+        ShutdownOutcome::Graceful
+    } else {
+        ShutdownOutcome::DeadlineExceeded
     };
 
     cancel.cancel();

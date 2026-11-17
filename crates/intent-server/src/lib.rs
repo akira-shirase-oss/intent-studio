@@ -7,6 +7,7 @@
 
 pub mod app;
 pub mod config;
+pub mod conn;
 pub mod error;
 pub mod health;
 pub mod intake;

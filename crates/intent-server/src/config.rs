@@ -95,6 +95,8 @@ pub struct Config {
     pub intake_deadline: Duration,
     /// Requests in flight before new ones are shed with 503.
     pub max_in_flight: usize,
+    /// Open connections, header-read timeout and write-stall deadline (F1).
+    pub connections: crate::conn::ConnectionLimits,
     /// Proxies whose `X-Forwarded-For` is believed.
     pub trusted_proxies: Vec<IpAddr>,
     /// Leads per minute per site (D-019).
@@ -250,6 +252,24 @@ impl Config {
                 "INTENT_INTAKE_DEADLINE_MS must be smaller than INTENT_REQUEST_TIMEOUT_MS".into(),
             );
         }
+        let connections = crate::conn::ConnectionLimits {
+            max_connections: usize::try_from(env.ranged(
+                "INTENT_MAX_CONNECTIONS",
+                1024,
+                1..=100_000,
+            ))
+            .unwrap_or(1024),
+            header_read_timeout: env.millis(
+                "INTENT_HEADER_READ_TIMEOUT_MS",
+                Duration::from_secs(10),
+                100..=120_000,
+            ),
+            write_stall: env.millis(
+                "INTENT_WRITE_STALL_TIMEOUT_MS",
+                Duration::from_secs(10),
+                100..=120_000,
+            ),
+        };
         let max_in_flight =
             usize::try_from(env.ranged("INTENT_MAX_IN_FLIGHT", 1024, 1..=100_000)).unwrap_or(1024);
         let mut trusted_proxies = Vec::new();
@@ -392,6 +412,7 @@ impl Config {
                 request_timeout,
                 intake_deadline,
                 max_in_flight,
+                connections,
                 trusted_proxies,
                 site_quota,
                 address_quota,

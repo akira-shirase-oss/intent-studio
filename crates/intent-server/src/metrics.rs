@@ -17,9 +17,15 @@ macro_rules! counters {
         }
 
         impl Metrics {
-            /// Renders every counter (and the extra gauges given) as Prometheus text.
-            pub fn render(&self, gauges: &[(&str, &str, u64)]) -> String {
+            /// Renders every counter (plus the extra counters and gauges given) as Prometheus
+            /// text.
+            pub fn render(&self, counters: &[(&str, &str, u64)], gauges: &[(&str, &str, u64)]) -> String {
                 let mut out = String::new();
+                for (name, help, value) in counters {
+                    let _ = writeln!(out, "# HELP intent_{name} {help}");
+                    let _ = writeln!(out, "# TYPE intent_{name} counter");
+                    let _ = writeln!(out, "intent_{name} {value}");
+                }
                 $(
                     let _ = writeln!(out, "# HELP intent_{} {}", stringify!($name), $help);
                     let _ = writeln!(out, "# TYPE intent_{} counter", stringify!($name));
@@ -85,7 +91,11 @@ mod tests {
         let metrics = Metrics::default();
         Metrics::inc(&metrics.leads_created_total);
         metrics.attempt(AttemptOutcome::TimedOut);
-        let text = metrics.render(&[("in_flight", "Requests in flight.", 3)]);
+        let text = metrics.render(
+            &[("extra_total", "An extra counter.", 7)],
+            &[("in_flight", "Requests in flight.", 3)],
+        );
+        assert!(text.contains("# TYPE intent_extra_total counter\nintent_extra_total 7\n"));
         assert!(text.contains("intent_leads_created_total 1\n"));
         assert!(text.contains("intent_notify_timeouts_total 1\n"));
         assert!(text.contains("intent_notify_attempts_total 1\n"));

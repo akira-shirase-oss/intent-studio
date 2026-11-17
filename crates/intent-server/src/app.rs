@@ -62,6 +62,8 @@ pub struct Inner {
     pub sign_in_limiter: Limiter<AddressKey>,
     /// Concurrent password hashes (CPU-bound, run off the async workers).
     pub hash_gate: Arc<Semaphore>,
+    /// Connection counters, kept by the accept loop.
+    pub connections: Arc<crate::conn::ConnectionStats>,
     started: Instant,
 }
 
@@ -84,6 +86,7 @@ impl App {
             site_limiter: Limiter::new(config.site_quota, config.rate_table_entries),
             sign_in_limiter: Limiter::new(sign_in_quota, 10_000),
             hash_gate: Arc::new(Semaphore::new(2)),
+            connections: Arc::new(crate::conn::ConnectionStats::default()),
             metrics: Metrics::default(),
             started: Instant::now(),
             config,
@@ -173,33 +176,55 @@ async fn metrics(State(app): State<App>) -> Response {
         .config
         .max_in_flight
         .saturating_sub(app.gate.available_permits());
-    let text = app.metrics.render(&[
+    let connections = &app.connections;
+    let load = |c: &std::sync::atomic::AtomicU64| c.load(std::sync::atomic::Ordering::Relaxed);
+    let counters = [
         (
-            "in_flight",
-            "Requests holding an intake permit.",
-            u64::try_from(in_flight).unwrap_or(0),
+            "connections_accepted_total",
+            "Connections accepted.",
+            load(&connections.accepted_total),
         ),
         (
-            "rate_table_address_keys",
-            "Keys in the per-address table.",
-            u64::try_from(app.address_limiter.len()).unwrap_or(0),
+            "connections_write_stalled_total",
+            "Connections closed because the client stopped reading.",
+            load(&connections.write_stalled_total),
         ),
-        (
-            "rate_table_address_evictions",
-            "Per-address keys evicted to stay bounded.",
-            app.address_limiter.evictions(),
-        ),
-        (
-            "rate_table_site_keys",
-            "Keys in the per-site table.",
-            u64::try_from(app.site_limiter.len()).unwrap_or(0),
-        ),
-        (
-            "database_up",
-            "1 when the last database probe succeeded.",
-            u64::from(app.health.database_up()),
-        ),
-    ]);
+    ];
+    let text = app.metrics.render(
+        &counters,
+        &[
+            (
+                "connections_open",
+                "Connections open now.",
+                load(&connections.open),
+            ),
+            (
+                "in_flight",
+                "Requests holding an intake permit.",
+                u64::try_from(in_flight).unwrap_or(0),
+            ),
+            (
+                "rate_table_address_keys",
+                "Keys in the per-address table.",
+                u64::try_from(app.address_limiter.len()).unwrap_or(0),
+            ),
+            (
+                "rate_table_address_evictions",
+                "Per-address keys evicted to stay bounded.",
+                app.address_limiter.evictions(),
+            ),
+            (
+                "rate_table_site_keys",
+                "Keys in the per-site table.",
+                u64::try_from(app.site_limiter.len()).unwrap_or(0),
+            ),
+            (
+                "database_up",
+                "1 when the last database probe succeeded.",
+                u64::from(app.health.database_up()),
+            ),
+        ],
+    );
     ([(header::CONTENT_TYPE, "text/plain; version=0.0.4")], text).into_response()
 }
 

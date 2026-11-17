@@ -10,8 +10,7 @@ use std::time::Duration;
 use argon2::{Argon2, PasswordHash, PasswordVerifier as _};
 use axum::{
     Json,
-    body::Bytes,
-    extract::{ConnectInfo, Query, State, rejection::BytesRejection, rejection::QueryRejection},
+    extract::{ConnectInfo, Query, State, rejection::QueryRejection},
     http::{HeaderMap, HeaderValue, StatusCode, header},
     response::{IntoResponse, Response},
 };
@@ -44,7 +43,8 @@ pub async fn sign_in(
     State(app): State<App>,
     ConnectInfo(peer): ConnectInfo<Peer>,
     headers: HeaderMap,
-    body: Result<Bytes, BytesRejection>,
+    // Read only after the rate limit (see `intake::read_body`).
+    body: axum::body::Body,
 ) -> Result<Response, ApiError> {
     let Some(hash) = app.config.operator_password_hash.clone() else {
         return Err(ApiError::SignInDisabled);
@@ -67,7 +67,7 @@ pub async fn sign_in(
     if !is_json {
         return Err(ApiError::UnsupportedMediaType);
     }
-    let body = body.map_err(|_| ApiError::MalformedBody)?;
+    let body = crate::intake::read_body(body).await?;
     let SignIn { password } = serde_json::from_slice(&body).map_err(|_| ApiError::MalformedBody)?;
     if password.is_empty() || password.len() > 1024 {
         return Err(ApiError::Unauthorized);
