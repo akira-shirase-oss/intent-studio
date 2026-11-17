@@ -13,17 +13,20 @@ password="e2e-operator-password-$(date +%s)"
 scripts/stack.sh up
 npm run build --workspace @intent-studio/workspace
 cargo build --release --locked -p intent-server
+# The binary just built, wherever CARGO_TARGET_DIR or a cargo config puts it (never a stale
+# ./target: scripts/test-scripts.sh, rule S1).
+bin="$(cargo metadata --format-version 1 --no-deps --locked | jq -r .target_directory)/release"
 docker compose -p intent-studio -f deploy/compose.yaml exec -T postgres \
     psql -q -U intent -d intent -c "DROP DATABASE IF EXISTS $db WITH (FORCE)" -c "CREATE DATABASE $db"
-INTENT_DATABASE_URL="$url" target/release/intent-server migrate
-INTENT_DATABASE_URL="$url" target/release/intent-server seed --sites 2
-hash="$(printf '%s\n' "$password" | target/release/intent-server hash-password)"
+INTENT_DATABASE_URL="$url" "$bin"/intent-server migrate
+INTENT_DATABASE_URL="$url" "$bin"/intent-server seed --sites 2
+hash="$(printf '%s\n' "$password" | "$bin"/intent-server hash-password)"
 
 log="$(mktemp)"
 INTENT_DATABASE_URL="$url" INTENT_BIND="127.0.0.1:$port" INTENT_NOTIFY_PROVIDER=recorder INTENT_PROFILE=development \
     INTENT_OPERATOR_PASSWORD_HASH="$hash" INTENT_COOKIE_SECURE=false \
     INTENT_WORKSPACE_DIR=apps/workspace/build INTENT_NOTIFY_POLL_MS=50 \
-    target/release/intent-server serve >"$log" 2>&1 &
+    "$bin"/intent-server serve >"$log" 2>&1 &
 server=$!
 trap 'kill "$server" 2>/dev/null || true; rm -f "$log"' EXIT
 for _ in $(seq 1 100); do

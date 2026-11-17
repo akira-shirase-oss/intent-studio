@@ -45,18 +45,21 @@ psql() { docker compose -p intent-studio -f deploy/compose.yaml exec -T postgres
 
 scripts/stack.sh up >/dev/null
 cargo build --release --locked -p intent-server -p intent-provider-fixture
+# The binaries just built, wherever CARGO_TARGET_DIR or a cargo config puts them (never a stale
+# ./target: scripts/test-scripts.sh, rule S1).
+bin="$(cargo metadata --format-version 1 --no-deps --locked | jq -r .target_directory)/release"
 psql -d intent -c "CREATE DATABASE $db"
-INTENT_DATABASE_URL="$url" target/release/intent-server migrate
-INTENT_DATABASE_URL="$url" target/release/intent-server seed --sites "$SITES"
+INTENT_DATABASE_URL="$url" "$bin"/intent-server migrate
+INTENT_DATABASE_URL="$url" "$bin"/intent-server seed --sites "$SITES"
 
-target/release/intent-provider-fixture --bind "127.0.0.1:$fixture_port" --mode unavailable \
+"$bin"/intent-provider-fixture --bind "127.0.0.1:$fixture_port" --mode unavailable \
     >"$work/fixture.log" 2>&1 &
 fixture=$!
 INTENT_DATABASE_URL="$url" INTENT_BIND="127.0.0.1:$port" INTENT_LOG=warn \
     INTENT_NOTIFY_PROVIDER=webhook INTENT_NOTIFY_WEBHOOK_URL="http://127.0.0.1:$fixture_port/v1/notify" \
     INTENT_NOTIFY_RETRY_BASE_MS="$RETRY_BASE_MS" INTENT_TRUSTED_PROXIES=127.0.0.1 \
     INTENT_DB_MAX_CONNECTIONS=32 \
-    target/release/intent-server serve >"$work/server.log" 2>&1 &
+    "$bin"/intent-server serve >"$work/server.log" 2>&1 &
 server=$!
 cleanup() {
     kill "$server" "$fixture" 2>/dev/null || true
@@ -100,7 +103,7 @@ fixture_after="$(curl -sf "http://127.0.0.1:$fixture_port/control/stats" || echo
 metrics_after="$(curl -sf "http://127.0.0.1:$port/metrics" || true)"
 
 set +e
-INTENT_DATABASE_URL="$url" target/release/intent-server reconcile --prefix "$run" \
+INTENT_DATABASE_URL="$url" "$bin"/intent-server reconcile --prefix "$run" \
     --acks "$work/acks.log" --require-terminal >"$work/verdict.json"
 reconcile_status=$?
 set -e

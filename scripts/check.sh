@@ -25,6 +25,7 @@ cargo test --workspace --locked
 step architecture
 scripts/check-architecture.sh
 scripts/test-architecture-check.sh
+scripts/test-scripts.sh
 
 step supply-chain
 if command -v cargo-deny >/dev/null 2>&1; then
