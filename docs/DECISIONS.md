@@ -343,7 +343,13 @@ starting values; changing one needs a measurement and a new entry.
   ten times worse and said nothing about the product. Load runs set the
   retry base to 1 second (the D-030 schedule at 1/60 scale), so a run sees
   every attempt, the drain after recovery and the `dead` cases in minutes;
-  the production base stays one minute.
+  the production base stays one minute. Each load run gets a database of its
+  own and drops it afterwards, and its pass condition cross-checks the
+  outbox against the provider (rows marked delivered = distinct provider
+  acceptances; duplicates ≤ uncertain attempts): a stray server left over
+  from a manual test once reconnected to a reused database name and marked
+  rows delivered through its own recorder, which only that cross-check
+  could have caught. The run is kept in `perf/results/`, marked invalid.
 
 ## Open questions (still open)
 

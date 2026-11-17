@@ -15,7 +15,8 @@
 # verdict — is written to perf/results/ whether it passed or not (misses are kept).
 #
 # Overrides: RATE, TOTAL, P99_MS, SITES, RETRY_BASE_MS (default 1000: the D-030 schedule at 1/60
-# scale, so a run sees the whole shape in minutes), DRAIN_TIMEOUT_S, K6.
+# scale, so a run sees the whole shape in minutes), DRAIN_TIMEOUT_S, K6, KEEP_DB (keep the run's
+# database instead of dropping it).
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
@@ -32,9 +33,11 @@ k6="${K6:-$(command -v k6 || echo "$HOME/.local/bin/k6")}"
 
 port=59403
 fixture_port=59481
-db=intent_load
-url="postgres://intent:intent-dev@127.0.0.1:59432/$db"
 stamp="$(date -u +%Y%m%dT%H%M%SZ)"
+# A database of its own per run: no stray process from an earlier run or a manual test can
+# reconnect to it by name and take part (one did once, through a reused name: D-037).
+db="intent_load_$(tr '[:upper:]' '[:lower:]' <<<"$stamp")"
+url="postgres://intent:intent-dev@127.0.0.1:59432/$db"
 run="load-${scenario}-${stamp}"
 work="perf/out/$run"
 mkdir -p "$work" perf/results
@@ -42,7 +45,7 @@ psql() { docker compose -p intent-studio -f deploy/compose.yaml exec -T postgres
 
 scripts/stack.sh up >/dev/null
 cargo build --release --locked -p intent-server -p intent-provider-fixture
-psql -d intent -c "DROP DATABASE IF EXISTS $db WITH (FORCE)" -c "CREATE DATABASE $db"
+psql -d intent -c "CREATE DATABASE $db"
 INTENT_DATABASE_URL="$url" target/release/intent-server migrate
 INTENT_DATABASE_URL="$url" target/release/intent-server seed --sites "$SITES"
 
@@ -55,7 +58,12 @@ INTENT_DATABASE_URL="$url" INTENT_BIND="127.0.0.1:$port" INTENT_LOG=warn \
     INTENT_DB_MAX_CONNECTIONS=32 \
     target/release/intent-server serve >"$work/server.log" 2>&1 &
 server=$!
-trap 'kill "$server" "$fixture" 2>/dev/null || true' EXIT
+cleanup() {
+    kill "$server" "$fixture" 2>/dev/null || true
+    wait "$server" "$fixture" 2>/dev/null || true
+    [ -n "${KEEP_DB:-}" ] || psql -d intent -c "DROP DATABASE IF EXISTS $db WITH (FORCE)" || true
+}
+trap cleanup EXIT
 for _ in $(seq 1 100); do
     curl -sf "http://127.0.0.1:$port/readyz" >/dev/null && break
     sleep 0.1
@@ -97,6 +105,15 @@ INTENT_DATABASE_URL="$url" target/release/intent-server reconcile --prefix "$run
 reconcile_status=$?
 set -e
 leaks="$(grep -cE 'example\.test|Load Lead |\+1 555 01|Quote request ' "$work/server.log" || true)"
+# Cross-check the outbox against the provider: every row marked delivered was accepted by the
+# provider, once per row, and any duplicate acceptance is covered by an uncertain attempt.
+delivered_rows="$(psql -d "$db" -c "SELECT count(*) FROM notification_outbox WHERE state = 'delivered'")"
+uncertain_attempts="$(psql -d "$db" -c "SELECT coalesce(sum(uncertain_attempts), 0) FROM notification_outbox")"
+unique_accepted="$(jq -r '.unique_accepted // -1' <<<"$fixture_after")"
+duplicates="$(jq -r '.duplicate_acceptances // -1' <<<"$fixture_after")"
+crosscheck=ok
+[ "$delivered_rows" = "$unique_accepted" ] || crosscheck="delivered rows $delivered_rows != provider acceptances $unique_accepted"
+[ "$duplicates" -le "$uncertain_attempts" ] || crosscheck="$crosscheck; $duplicates duplicates > $uncertain_attempts uncertain attempts"
 
 commit="$(git rev-parse HEAD)"
 # Untracked files count too: a result names exactly what produced it.
@@ -104,7 +121,7 @@ commit="$(git rev-parse HEAD)"
     || commit="$commit (with uncommitted changes)"
 machine="$(sysctl -n machdep.cpu.brand_string 2>/dev/null || uname -m), $(sysctl -n hw.ncpu 2>/dev/null || nproc) cores, $(( $(sysctl -n hw.memsize 2>/dev/null || echo 0) / 1073741824 )) GiB, $(sw_vers -productName 2>/dev/null || uname -s) $(sw_vers -productVersion 2>/dev/null || uname -r)"
 pass=yes
-[ "$k6_status" = 0 ] && [ "$reconcile_status" = 0 ] && [ "$leaks" = 0 ] || pass=no
+[ "$k6_status" = 0 ] && [ "$reconcile_status" = 0 ] && [ "$leaks" = 0 ] && [ "$crosscheck" = ok ] || pass=no
 
 result="perf/results/$(date -u +%Y-%m-%d)-${scenario}-$(git rev-parse --short HEAD).json"
 metric() { grep -E "^intent_$1 " <<<"$2" | awk '{print $2}' | head -1; }
@@ -114,7 +131,8 @@ jq -n \
     --arg pass "$pass" --argjson k6_status "$k6_status" --argjson reconcile_status "$reconcile_status" \
     --argjson rate "$RATE" --argjson total "$TOTAL" --argjson p99_ms "$P99_MS" --argjson sites "$SITES" \
     --argjson retry_base_ms "$RETRY_BASE_MS" --argjson drain_seconds "$drain_seconds" \
-    --argjson leaks "$leaks" \
+    --argjson leaks "$leaks" --arg crosscheck "$crosscheck" --arg database "$db" \
+    --argjson delivered_rows "$delivered_rows" --argjson uncertain_attempts "$uncertain_attempts" \
     --argjson fixture_down "$fixture_down" --argjson fixture_after "$fixture_after" \
     --slurpfile k6 "$work/k6-summary.json" --slurpfile verdict "$work/verdict.json" \
     --arg attempts "$(metric notify_attempts_total "$metrics_after")" \
@@ -147,9 +165,11 @@ jq -n \
       provider_fixture: { at_end_of_run: $fixture_down, after_recovery: $fixture_after },
       notifier: { attempts: $attempts, dead: $dead, timeouts: $timeouts, drain_seconds_after_recovery: $drain_seconds },
       intake: { shed: $shed, unavailable: $unavailable, address_table_keys: $address_keys, address_table_evictions: $address_evictions },
-      log_lines_with_lead_content: $leaks
+      log_lines_with_lead_content: $leaks,
+      outbox_vs_provider: { delivered_rows: $delivered_rows, uncertain_attempts: $uncertain_attempts, verdict: $crosscheck },
+      database: $database
     }' >"$result"
 
 echo "result: $result (pass: $pass)"
-jq '{pass, k6: {iterations: .k6.iterations, achieved_rate_per_s: .k6.achieved_rate_per_s, dropped_iterations: .k6.dropped_iterations, p50: .k6.http_req_duration_ms.med, p99: .k6.http_req_duration_ms["p(99)"], acknowledged_rate: .k6.acknowledged_rate}, reconcile: {violations: .reconcile.violations, acknowledged_submissions: .reconcile.acknowledged_submissions, outbox: .reconcile.outbox}, uptime_before}' "$result"
+jq '{pass, outbox_vs_provider, k6: {iterations: .k6.iterations, achieved_rate_per_s: .k6.achieved_rate_per_s, dropped_iterations: .k6.dropped_iterations, p50: .k6.http_req_duration_ms.med, p99: .k6.http_req_duration_ms["p(99)"], acknowledged_rate: .k6.acknowledged_rate}, reconcile: {violations: .reconcile.violations, acknowledged_submissions: .reconcile.acknowledged_submissions, outbox: .reconcile.outbox}, uptime_before}' "$result"
 [ "$pass" = yes ]

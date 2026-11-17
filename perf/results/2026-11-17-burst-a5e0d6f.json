@@ -1,0 +1,111 @@
+{
+  "scenario": "burst",
+  "run": "load-burst-20261117T015416Z",
+  "started": "2026-11-17T01:54:20Z",
+  "commit": "a5e0d6f592be7d6a9343117d93b13afb62fe17ac",
+  "machine": "Apple M2 Pro, 12 cores, 32 GiB, macOS 27.2.1",
+  "uptime_before": "20:54  up  7:22, 3 users, load averages: 44.87 39.83 45.49",
+  "uptime_after": "20:55  up  7:23, 3 users, load averages: 28.64 36.04 43.68",
+  "note": "Development observation on a shared laptop, not production capacity. The load generator, the server and Postgres (Docker) share the machine.",
+  "config": {
+    "rate_per_s": 250,
+    "total": 15000,
+    "p99_threshold_ms": 100,
+    "sites": 10000,
+    "provider": "fixture refusing with 503 for the whole run",
+    "resubmissions": "every 20th (5%)",
+    "retry_base_ms": 1000,
+    "db_connections": 32
+  },
+  "pass": false,
+  "k6_exit": 0,
+  "reconcile_exit": 0,
+  "k6": {
+    "iterations": 15001,
+    "achieved_rate_per_s": 250.00643723660974,
+    "dropped_iterations": 0,
+    "http_req_duration_ms": {
+      "p(99.9)": 116.6780000000062,
+      "max": 142.913,
+      "min": 0.706,
+      "med": 6.135,
+      "avg": 10.744400039997325,
+      "p(90)": 25.987,
+      "p(95)": 35.182,
+      "p(99)": 64.791
+    },
+    "acknowledged_rate": 1,
+    "refused": 0,
+    "unanswered": 0,
+    "replays": 750,
+    "thresholds": {
+      "dropped_iterations": {
+        "count<1": {
+          "ok": true
+        }
+      },
+      "lead_acknowledged": {
+        "rate>0.999": {
+          "ok": true
+        }
+      },
+      "http_req_duration": {
+        "p(99)<100": {
+          "ok": true
+        }
+      }
+    }
+  },
+  "reconcile": {
+    "acknowledgments": 15001,
+    "acknowledged_submissions": 14251,
+    "stored_leads": 14251,
+    "stored_not_acknowledged": 0,
+    "outbox": {
+      "delivered/1": 7064,
+      "delivered/2": 3665,
+      "delivered/3": 1817,
+      "delivered/4": 1069,
+      "delivered/5": 615,
+      "delivered/6": 21
+    },
+    "uncertain_attempts": 0,
+    "violations": []
+  },
+  "provider_fixture": {
+    "at_end_of_run": {
+      "mode": "unavailable",
+      "attempts": 13071,
+      "accepted": 0,
+      "refused": 13071,
+      "hung": 0,
+      "unique_accepted": 0,
+      "duplicate_acceptances": 0,
+      "untracked": 0
+    },
+    "after_recovery": {
+      "mode": "ok",
+      "attempts": 13648,
+      "accepted": 577,
+      "refused": 13071,
+      "hung": 0,
+      "unique_accepted": 577,
+      "duplicate_acceptances": 0,
+      "untracked": 0
+    }
+  },
+  "notifier": {
+    "attempts": "13648",
+    "dead": "0",
+    "timeouts": "0",
+    "drain_seconds_after_recovery": 237
+  },
+  "intake": {
+    "shed": "0",
+    "unavailable": "0",
+    "address_table_keys": "15001",
+    "address_table_evictions": "0"
+  },
+  "log_lines_with_lead_content": 0,
+  "contaminated": "INVALID for the notification side: a stray intent-server (a manual latency probe started at 20:49 with the in-memory recorder provider, missed by a pkill pattern) was connected to the reused database name intent_load and its notifier claimed and recorded outbox rows as delivered, so the outbox and provider counts below do not describe this run (the fixture accepted 577; 14,251 rows were marked delivered). The intake side (k6 metrics, every acknowledgment reconciled against the database) is unaffected but shared the database with that process. Superseded by the rerun on the next commit; scripts/load.sh now uses a database per run and cross-checks delivered rows against provider acceptances."
+}

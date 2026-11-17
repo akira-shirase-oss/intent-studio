@@ -243,7 +243,10 @@ pub fn router(app: App) -> Router {
             TraceLayer::new_for_http()
                 .make_span_with(make_span)
                 .on_request(())
-                .on_response(DefaultOnResponse::new().level(Level::INFO)),
+                .on_response(DefaultOnResponse::new().level(Level::INFO))
+                // Refusals are logged once by `ApiError` at a level by fault; tower-http would
+                // log every 5xx (an honest 503 included) again as an ERROR.
+                .on_failure(()),
         )
         .layer(axum_mw::from_fn(crate::error::envelope))
         .layer(CatchPanicLayer::custom(panic_response))

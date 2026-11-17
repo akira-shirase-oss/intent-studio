@@ -18,3 +18,4 @@ latency threshold missed on a busy machine is kept as a miss, not rerun until gr
 | Date | Scenario | Submissions | Rate | Commit | Load avg (1 min) before | Acknowledged / reconciled | p50 / p99 | Thresholds |
 |---|---|---|---|---|---|---|---|---|
 | 2026-11-17 | realism (50/s, 60 s) | 3,001 | 50.0/s | 50bc7d0 (tooling uncommitted, see file) | 27.42 | 100% / 0 violations, all outbox rows delivered after recovery | 24.9 ms / 402 ms | **missed** p99 < 100 ms; others held |
+| 2026-11-17 | burst (250/s, 60 s) | 15,001 | 250.0/s | a5e0d6f | 44.87 | **invalid**: a stray server of mine shared the reused database and "delivered" outbox rows to its in-memory recorder; see the file's `contaminated` note | (6.1 ms / 64.8 ms, intake only) | not counted; rerun below |
