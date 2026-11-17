@@ -1,0 +1,75 @@
+[workspace]
+members = ["crates/*"]
+resolver = "3"
+
+[workspace.package]
+version = "0.1.0-alpha.0"
+edition = "2024"
+rust-version = "1.99"
+repository = "https://github.com/akira-shirase-oss/intent-studio"
+license = "MIT"
+# Licensed MIT (see LICENSE). The crates are not published to crates.io.
+publish = false
+
+[workspace.dependencies]
+# Internal crates.
+intent-domain = { path = "crates/intent-domain" }
+intent-db = { path = "crates/intent-db" }
+intent-notify = { path = "crates/intent-notify" }
+intent-provider-fixture = { path = "crates/intent-provider-fixture" }
+
+# External crates: versions live here only (rust-mastery chapter 15). Minimal features;
+# one async runtime (Tokio); no TLS stack until the first real provider adapter needs one.
+anyhow = "1.0.104"
+argon2 = "0.5.3"
+axum = "0.8.9"
+clap = { version = "4.6", default-features = false, features = ["std", "derive", "help", "usage", "error-context", "env"] }
+fastrand = "2.4"
+# Bounded least-recently-used tables for the rate limiter (already in the graph through sqlx).
+hashlink = "0.11"
+hex = "0.4.3"
+# Plain HTTP only in I0: the provider fixture is local. TLS (rustls) arrives with the first
+# real provider adapter, so no TLS stack is compiled before something needs it.
+reqwest = { version = "0.13.5", default-features = false, features = ["json"] }
+serde = { version = "1.0.229", features = ["derive"] }
+serde_json = "1.0.154"
+serde_urlencoded = "0.7.1"
+sha2 = "0.11"
+sqlx = { version = "0.9.0", default-features = false, features = ["runtime-tokio", "postgres", "macros", "migrate", "uuid", "time"] }
+thiserror = "2.0.21"
+time = { version = "0.3.55", default-features = false, features = ["std", "serde", "formatting", "parsing"] }
+tokio = { version = "1.54", features = ["rt-multi-thread", "macros", "net", "signal", "sync", "time", "process", "io-util"] }
+tokio-util = { version = "0.7.20", features = ["rt"] }
+tower = { version = "0.5.3", features = ["util"] }
+tower-http = { version = "0.7.1", features = ["request-id", "trace", "timeout", "limit", "catch-panic", "fs"] }
+tracing = "0.1.44"
+tracing-subscriber = { version = "0.3.23", features = ["env-filter", "json"] }
+uuid = { version = "1.29", default-features = false, features = ["std", "serde"] }
+
+[workspace.lints.rust]
+unsafe_code = "forbid"
+unused_must_use = "deny"
+unreachable_pub = "warn"
+rust_2018_idioms = { level = "warn", priority = -1 }
+
+[workspace.lints.clippy]
+all = { level = "deny", priority = -1 }
+pedantic = { level = "warn", priority = -1 }
+missing_errors_doc = "allow"
+missing_panics_doc = "allow"
+must_use_candidate = "allow"
+module_name_repetitions = "allow"
+dbg_macro = "deny"
+todo = "deny"
+unimplemented = "deny"
+unwrap_used = "warn"
+expect_used = "warn"
+allow_attributes_without_reason = "deny"
+
+[workspace.lints.rustdoc]
+broken_intra_doc_links = "deny"
+private_intra_doc_links = "deny"
+bare_urls = "deny"
+
+[profile.release]
+debug = "line-tables-only"

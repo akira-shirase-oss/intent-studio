@@ -1,0 +1,24 @@
+[package]
+name = "intent-domain"
+description = "Intent Studio's pure domain: leads, submission keys, states, retry schedule and abuse limits. No I/O (scripts/check-architecture.sh enforces it)."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+# No async runtime, database, HTTP or filesystem crates may appear here. Hashing and serde are
+# pure computation.
+[dependencies]
+hex.workspace = true
+serde.workspace = true
+sha2.workspace = true
+thiserror.workspace = true
+uuid.workspace = true
+
+[dev-dependencies]
+serde_json.workspace = true
+serde_urlencoded.workspace = true
+
+[lints]
+workspace = true

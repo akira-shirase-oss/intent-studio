@@ -1,0 +1,8 @@
+# Build and runtime artifacts only (nothing a reviewer needs).
+/target
+node_modules/
+/apps/workspace/build/
+/apps/workspace/.svelte-kit/
+/packages/ui/.svelte-kit/
+/perf/out/
+.DS_Store
