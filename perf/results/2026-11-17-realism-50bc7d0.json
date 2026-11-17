@@ -1,0 +1,111 @@
+{
+  "scenario": "realism",
+  "run": "load-realism-20261117T014418Z",
+  "started": "2026-11-17T01:44:23Z",
+  "commit": "50bc7d0a3406fbdb1a0391e809c2509fb5f3937b",
+  "machine": "Apple M2 Pro, 12 cores, 32 GiB, macOS 27.2.1",
+  "uptime_before": "20:44  up  7:12, 3 users, load averages: 27.42 56.92 55.64",
+  "uptime_after": "20:45  up  7:13, 3 users, load averages: 30.53 52.06 53.89",
+  "note": "Development observation on a shared laptop, not production capacity. The load generator, the server and Postgres (Docker) share the machine.",
+  "config": {
+    "rate_per_s": 50,
+    "total": 3000,
+    "p99_threshold_ms": 100,
+    "sites": 10000,
+    "provider": "fixture refusing with 503 for the whole run",
+    "resubmissions": "every 20th (5%)",
+    "retry_base_ms": 1000,
+    "db_connections": 32
+  },
+  "pass": false,
+  "k6_exit": 99,
+  "reconcile_exit": 0,
+  "k6": {
+    "iterations": 3001,
+    "achieved_rate_per_s": 49.99271765527391,
+    "dropped_iterations": 0,
+    "http_req_duration_ms": {
+      "avg": 43.98014961679451,
+      "p(90)": 78.499,
+      "p(95)": 153.45,
+      "p(99)": 402.445,
+      "p(99.9)": 655.6400000000071,
+      "max": 717.706,
+      "min": 1.239,
+      "med": 24.871
+    },
+    "acknowledged_rate": 1,
+    "refused": 0,
+    "unanswered": 0,
+    "replays": 150,
+    "thresholds": {
+      "lead_acknowledged": {
+        "rate>0.999": {
+          "ok": true
+        }
+      },
+      "dropped_iterations": {
+        "count<1": {
+          "ok": true
+        }
+      },
+      "http_req_duration": {
+        "p(99)<100": {
+          "ok": false
+        }
+      }
+    }
+  },
+  "reconcile": {
+    "acknowledgments": 3001,
+    "acknowledged_submissions": 2851,
+    "stored_leads": 2851,
+    "stored_not_acknowledged": 0,
+    "outbox": {
+      "delivered/1": 386,
+      "delivered/2": 414,
+      "delivered/3": 429,
+      "delivered/4": 522,
+      "delivered/5": 1083,
+      "delivered/6": 17
+    },
+    "uncertain_attempts": 0,
+    "violations": []
+  },
+  "provider_fixture": {
+    "at_end_of_run": {
+      "mode": "unavailable",
+      "attempts": 7251,
+      "accepted": 0,
+      "refused": 7251,
+      "hung": 0,
+      "unique_accepted": 0,
+      "duplicate_acceptances": 0,
+      "untracked": 0
+    },
+    "after_recovery": {
+      "mode": "ok",
+      "attempts": 10106,
+      "accepted": 2851,
+      "refused": 7255,
+      "hung": 0,
+      "unique_accepted": 2851,
+      "duplicate_acceptances": 0,
+      "untracked": 0
+    }
+  },
+  "notifier": {
+    "attempts": "10106",
+    "dead": "0",
+    "timeouts": "0",
+    "drain_seconds_after_recovery": 248
+  },
+  "intake": {
+    "shed": "0",
+    "unavailable": "0",
+    "address_table_keys": "3001",
+    "address_table_evictions": "0"
+  },
+  "log_lines_with_lead_content": 0,
+  "tooling_note": "The server and database code were exactly commit 50bc7d0. perf/k6/leads.js and scripts/load.sh were not yet committed when this ran. In the next commit leads.js is unchanged, and load.sh changes only in its uncommitted-change check, which missed untracked files and so did not flag this run."
+}

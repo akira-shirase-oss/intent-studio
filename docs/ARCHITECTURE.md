@@ -1,7 +1,9 @@
 # Architecture
 
-Planned architecture — no code exists yet. Crate and package names are
-fixed at I0.
+The I0 crates exist (`intent-domain`, `intent-db`, `intent-notify`,
+`intent-provider-fixture`, `intent-server`, `apps/workspace`,
+`packages/ui`); the rest of this document is still the plan. The lead-intake
+spine as built is described in `docs/modules/01-lead-intake.md`.
 
 ## Sources of truth
 
@@ -28,13 +30,16 @@ fixed at I0.
 |---|---|
 | `intent-domain` | Pure types and transitions: tenant, brief, fact, design spec, page tree, candidate, check record, approval, release, lead, observation, proposal; the invalid-state list; every limit. No I/O — CI enforces it. |
 | `intent-db` | Migrations and access: tenant-scoped queries, the outbox, the release ledger, the lead inbox, evidence records. |
+| `intent-notify` | The notification provider port: the webhook adapter (outbox row id as `Idempotency-Key`) and an in-memory recorder; the real e-mail adapter arrives at I3 (D-032). Holds no database access. |
+| `intent-provider-fixture` | The provider-down harness for drills and load runs: accept, refuse (503), hang, or accept and then hang. Development and test only. |
 | `intent-egress` | The one way to fetch a client-named URL: address policy, DNS pinning, redirect revalidation, size and time caps (D-012). |
 | `intent-agent` | The bounded agent loop: provider-neutral model port (the only place a provider client may be called), allowlisted tools, budget metering, structured-output validation, revision records. |
 | `intent-render` | Job driver for the isolated worker (D-011): asset processing, the deterministic static build, the check suite; results flow back as a check record. |
 | `intent-publish` | Deployment adapters (`local-static` for CI and drills; Cloudflare Pages direct upload, D-017): promote, rollback, read-back reconciliation. Holds the only decryption path for deploy tokens. |
 | `intent-review` | Observation aggregation and the versioned decision rule (D-023). May not depend on `intent-publish` — CI enforces it. |
 | `intent-server` | Axum API: workspace endpoints, approval links, lead intake, the observation beacon, preview serving; serves the built workspace app on the same origin. |
-| `apps/workspace` | SvelteKit + TypeScript workspace: brief entry, facts, candidate review, approval, lead inbox, evidence. Client-side; holds no authority. |
+| `apps/workspace` | SvelteKit + TypeScript workspace: brief entry, facts, candidate review, approval, lead inbox, evidence. Client-side; holds no authority. I0 ships operator sign-in and the read-only lead inbox. |
+| `packages/ui` | This repository's own copy of Colophon's UI kit (Tailwind CSS v4 + shadcn-svelte), taken at I0; no dependency on the Colophon repository. |
 | `packages/site-components` | The tested Svelte component set for the first site pattern, built to static output; per-template page budgets. |
 | `packages/checks` | The Playwright + axe-core promotion suite (TypeScript, run inside the worker) and the Lighthouse budget runner. |
 
@@ -129,9 +134,11 @@ stay `uncertain` until reconciled; they are never relabeled success.
 ## Layout
 
 ```
-crates/                    intent-domain, intent-db, intent-egress,
-                           intent-agent, intent-render, intent-publish,
-                           intent-review, intent-server
+crates/                    intent-domain, intent-db, intent-notify,
+                           intent-provider-fixture, intent-server (I0);
+                           intent-egress, intent-agent, intent-render,
+                           intent-publish, intent-review (later)
+packages/ui/               the UI kit (copied from Colophon, owned here)
 apps/workspace/            SvelteKit workspace
 packages/site-components/  tested components + per-template budgets
 packages/checks/           Playwright + axe-core suite, Lighthouse runner

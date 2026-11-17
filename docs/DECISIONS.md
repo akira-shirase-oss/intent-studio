@@ -3,7 +3,8 @@
 Deliberate choices, newest last. D-NNN numbering follows the workspace
 convention. D-001–D-009 seed the contract's prescribed directions;
 D-010–D-029 were decided before any code to close the questions that
-blocked milestone 0 and to fix gaps a plan review found. Where something
+blocked milestone 0 and to fix gaps a plan review found; D-030–D-037 were
+made while building I0. Where something
 still needs the maintainer or an outside party, it is listed under *Open
 questions (still open)* and in the README's *Blocked on* table.
 
@@ -257,6 +258,92 @@ starting values; changing one needs a measurement and a new entry.
   and on the fixture leads' emails and phone numbers. Logs carry lead IDs,
   not lead content. Cost: debugging a lead means reading the inbox, not the
   log.
+
+## Decisions made while building I0 (2026-11-16)
+
+- **D-030 — D-020's retry arithmetic, corrected.** D-020 promised "about a
+  day in total" from a 1-minute start, a 6-hour cap and 8 attempts with
+  full jitter, but doubling from 1 minute reaches only 64 minutes by the
+  seventh wait (at most 127 minutes in total, about an hour on average
+  with full jitter), so a provider outage of a couple of hours would have
+  killed most notifications. The schedule now grows 4× per attempt: after
+  failed attempt *k* the wait is drawn uniformly from `[c/2, c]` with
+  `c = min(6 h, 1 min × 4^(k−1))` — ceilings 1, 4, 16, 64, 256, 360 and
+  360 minutes, 8.8 to 17.7 hours of waiting in total. The floor (equal
+  jitter instead of full jitter) is what makes the total predictable;
+  spreading stays wide (half the ceiling). Base, cap and attempts are
+  unchanged; drills and load runs scale the base (the cap is always
+  360 × base). Proven by `intent-domain` `outbox` tests and the
+  `notify-down` drill's per-key schedule check. Cost: an outage longer
+  than about 9 hours can still exhaust attempts; the row is `dead`,
+  visible, and keeps its lead.
+- **D-031 — Lead fields, consent and retention days.** A lead is name
+  (required, ≤ 200 characters), e-mail (≤ 254, shape-checked) and/or phone
+  (6–15 digits) — at least one contact — an optional message (≤ 5,000),
+  service and area (≤ 100 each), and `consent`, which must be `true` (a
+  ticked box: the visitor agrees to be contacted under the site's privacy
+  notice, whose text is still B-3). Unknown fields are refused, so stored
+  content is exactly what the form declares. Retention is counted in days
+  (365 by default, 30–3,650 per tenant), so "12 months" never depends on
+  month lengths; each lead stores its own `retain_until`. A filled
+  honeypot is refused with `400 rejected` — honest, but deliberately
+  unspecific — rather than answered with a fake success, because nothing
+  may be acknowledged that was not stored. Validation errors name the
+  field and a code and never echo a value.
+- **D-032 — `intent-notify`, and who may hold an HTTP client.** The
+  notification provider port and its adapters live in their own crate:
+  `intent-notify` (a webhook adapter speaking JSON with the outbox row id
+  as `Idempotency-Key`, and an in-memory recorder). The architecture
+  check's HTTP-client rule (A3) allows an HTTP client crate only in
+  `intent-egress` (client-named URLs), `intent-agent` (the model port)
+  and `intent-notify` (the operator-configured provider endpoint, never
+  a URL from client input). In I0 the webhook adapter speaks plain HTTP
+  only, to the local provider fixture; TLS (rustls) arrives with the
+  first real e-mail adapter at I3. `intent-provider-fixture` is the
+  provider-down harness (ok, 503, hang, accept-then-hang), development and
+  test only.
+- **D-033 — Deferred to I3, with the first release: CORS, the no-script
+  303, the hourly digest, manual resend, retention purge.** Each of these
+  needs something I0 does not have — a site's release origins and
+  thank-you page (CORS, 303), the real e-mail adapter (digest above 10 an
+  hour per site, D-019), the inbox's write actions (manual resend of a
+  `dead` row, D-020), the deletion path (purge past `retain_until`).
+  I0 accepts JSON and form posts and answers both with JSON; no published
+  site can post to it until I3 anyway.
+- **D-034 — The notifier never shares intake's resources.** It has its
+  own connection pool (4 by default) and a bounded number of attempts in
+  flight (32), claims only as many rows as it can start, and holds no
+  transaction across a provider call. Measured reason: in the first
+  `notify-down` drill, with one shared pool, intake p99 rose with the
+  notifier's backlog. After an attempt the notifier keeps retrying the
+  record while its lease can still be valid (lease − attempt deadline),
+  so a short database blip does not turn into a duplicate notification;
+  longer than that, the lease expires and the row is sent again, counted
+  as an uncertain attempt. Every drill asserts duplicates ≤ uncertain
+  attempts.
+- **D-035 — Readiness and refusals while the database is down.** A
+  prober pings PostgreSQL every 500 ms (1 s deadline); readiness is red
+  while the last probe failed, and intake answers `503 unavailable` with
+  `Retry-After: 2` at once instead of queueing. Storing a lead has a
+  3-second deadline and the pool a 1-second acquire timeout; past either,
+  the answer is a 503 that acknowledges nothing (a commit that lands after
+  a timeout is found by the resend, which gets `200` with the same lead).
+  Proven by the `db-down` drill.
+- **D-036 — The operator session.** `POST /v1/operator/session` verifies
+  the argon2id hash from `INTENT_OPERATOR_PASSWORD_HASH` off the async
+  workers (two at a time, five attempts a minute per address); the
+  session token is 32 random bytes in an `HttpOnly`, `SameSite=Strict`
+  cookie with a 12-hour lifetime, stored only as a SHA-256 digest. Every
+  inbox page read is cross-tenant and writes an `operator_audit` row with
+  ids and counts, never content. Without a configured hash, sign-in is
+  off (`503`), not open.
+- **D-037 — Drills run the release binary; load runs scale the retry
+  schedule.** The drills (`scripts/drills.sh`) test the release build,
+  as deployed: the debug build's latency under the drills' load measured
+  ten times worse and said nothing about the product. Load runs set the
+  retry base to 1 second (the D-030 schedule at 1/60 scale), so a run sees
+  every attempt, the drain after recovery and the `dead` cases in minutes;
+  the production base stays one minute.
 
 ## Open questions (still open)
 
