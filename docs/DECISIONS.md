@@ -486,6 +486,14 @@ starting values; changing one needs a measurement and a new entry.
   `intake::metrics_are_for_the_host_or_a_token_holder_only`, which failed
   before the change.
 
+- **D-050 — A floor for the operator's password hash.** At startup the
+  configured hash must parse as a PHC string, be argon2id, and use at
+  least 19 MiB of memory and 2 iterations (OWASP's baseline, which
+  `intent-server hash-password` meets); anything else refuses to start,
+  without quoting the hash. Proven by
+  `config::tests::a_weak_or_malformed_password_hash_is_refused`, which
+  failed before the change (a 8 KiB, 1-iteration hash loaded).
+
 ## Open questions (still open)
 
 These need the maintainer or an outside party; each is in the README's

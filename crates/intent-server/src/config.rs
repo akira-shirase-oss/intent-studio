@@ -229,6 +229,28 @@ impl<F: Fn(&str) -> Option<String>> Reader<F> {
     }
 }
 
+/// The weakest argon2id parameters accepted (OWASP's baseline): 19 MiB of memory, 2 iterations.
+const ARGON2_MIN_MEMORY_KIB: u32 = 19_456;
+/// See [`ARGON2_MIN_MEMORY_KIB`].
+const ARGON2_MIN_ITERATIONS: u32 = 2;
+
+/// An argon2id PHC string at or above the parameter floor. Problems never quote the hash.
+fn check_password_hash(phc: &str) -> Result<(), &'static str> {
+    let parsed = argon2::PasswordHash::new(phc)
+        .map_err(|_| "not a valid PHC string (make one with `intent-server hash-password`)")?;
+    if parsed.algorithm.as_str() != "argon2id" {
+        return Err("expected an argon2id hash (`intent-server hash-password`)");
+    }
+    let params = argon2::Params::try_from(&parsed)
+        .map_err(|_| "not a valid PHC string (its parameters do not parse)")?;
+    if params.m_cost() < ARGON2_MIN_MEMORY_KIB || params.t_cost() < ARGON2_MIN_ITERATIONS {
+        return Err(
+            "argon2id parameters below the floor (19 MiB of memory, 2 iterations; `intent-server hash-password` meets it)",
+        );
+    }
+    Ok(())
+}
+
 /// The defaults are non-zero constants, so a quota always builds.
 fn unreachable_quota() -> Quota {
     Quota::per_minute(1).unwrap_or_else(|| unreachable!("invariant: 1 is a valid quota"))
@@ -429,11 +451,10 @@ impl Config {
         }
         let operator_password_hash = env.secret("INTENT_OPERATOR_PASSWORD_HASH");
         if let Some(hash) = &operator_password_hash
-            && !hash.expose().starts_with("$argon2id$")
+            && let Err(problem) = check_password_hash(hash.expose())
         {
-            env.problems.push(
-                "INTENT_OPERATOR_PASSWORD_HASH: expected an argon2id PHC string (`intent-server hash-password`)".into(),
-            );
+            env.problems
+                .push(format!("INTENT_OPERATOR_PASSWORD_HASH: {problem}"));
         }
         let session_ttl = Duration::from_secs(env.ranged(
             "INTENT_SESSION_TTL_SECS",
@@ -531,6 +552,42 @@ mod tests {
         ("INTENT_PROFILE", "development"),
     ];
 
+    fn phc(memory_kib: u32, iterations: u32) -> String {
+        use argon2::{
+            Algorithm, Argon2, Params, PasswordHasher as _, Version, password_hash::SaltString,
+        };
+        let params = Params::new(memory_kib, iterations, 1, None).unwrap();
+        let salt = SaltString::encode_b64(b"0123456789abcdef").unwrap();
+        Argon2::new(Algorithm::Argon2id, Version::V0x13, params)
+            .hash_password(b"password", &salt)
+            .unwrap()
+            .to_string()
+    }
+
+    #[test]
+    fn a_weak_or_malformed_password_hash_is_refused() {
+        let with = |hash: &str| {
+            let mut pairs: Vec<(&str, String)> =
+                MINIMAL.iter().map(|(k, v)| (*k, (*v).to_owned())).collect();
+            pairs.push(("INTENT_OPERATOR_PASSWORD_HASH", hash.to_owned()));
+            let map: HashMap<String, String> =
+                pairs.into_iter().map(|(k, v)| (k.to_owned(), v)).collect();
+            Config::from_lookup(move |key| map.get(key).cloned())
+        };
+        assert!(
+            with(&phc(19_456, 2)).is_ok(),
+            "the OWASP baseline is accepted"
+        );
+        let weak = with(&phc(8, 1)).unwrap_err().to_string();
+        assert!(weak.contains("below the floor"), "{weak}");
+        let short = with(&phc(19_456, 1)).unwrap_err().to_string();
+        assert!(short.contains("below the floor"), "{short}");
+        let garbage = with("$argon2id$v=19$m=19456,t=2,p=1$c2FsdA$aGFzaA")
+            .unwrap_err()
+            .to_string();
+        assert!(garbage.contains("not a valid"), "{garbage}");
+    }
+
     #[test]
     fn the_notifier_pool_is_sized_for_its_concurrency() {
         let defaults = config(&MINIMAL).unwrap();
@@ -622,10 +679,8 @@ mod tests {
     #[test]
     fn secrets_never_print() {
         let mut pairs = MINIMAL.to_vec();
-        pairs.push((
-            "INTENT_OPERATOR_PASSWORD_HASH",
-            "$argon2id$v=19$m=19456,t=2,p=1$c2FsdA$aGFzaA",
-        ));
+        let real = phc(19_456, 2);
+        pairs.push(("INTENT_OPERATOR_PASSWORD_HASH", real.as_str()));
         let c = config(&pairs).unwrap();
         let printed = format!("{c:?}");
         assert!(!printed.contains("hunter2"));
@@ -642,7 +697,7 @@ mod tests {
         let mut pairs = MINIMAL.to_vec();
         pairs.push(("INTENT_OPERATOR_PASSWORD_HASH", "plaintext-password"));
         let text = config(&pairs).unwrap_err().to_string();
-        assert!(text.contains("argon2id PHC"));
+        assert!(text.contains("not a valid PHC"));
         assert!(!text.contains("plaintext-password"));
     }
 }
