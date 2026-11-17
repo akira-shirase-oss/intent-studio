@@ -4,19 +4,39 @@ import { expect, test } from '@playwright/test';
 
 const password = process.env['WORKSPACE_PASSWORD'] ?? '';
 
+/** Presses Tab until the focused element matches, as a keyboard user would; fails after 15. */
+async function tabTo(page: import('@playwright/test').Page, matches: (el: Element) => boolean) {
+	for (let i = 0; i < 15; i += 1) {
+		await page.keyboard.press('Tab');
+		if (await page.evaluate(`(${matches.toString()})(document.activeElement)`)) return;
+	}
+	throw new Error('Tab never reached the element');
+}
+
+/** The focused element shows a visible focus indicator (a ring or an outline). */
+async function focusIsVisible(page: import('@playwright/test').Page) {
+	return page.evaluate(() => {
+		const el = document.activeElement;
+		if (!el) return false;
+		const style = getComputedStyle(el);
+		return style.boxShadow !== 'none' || (style.outlineStyle !== 'none' && style.outlineWidth !== '0px');
+	});
+}
+
 test('the operator signs in with the keyboard alone, reads the inbox and signs out', async ({ page }) => {
 	await page.goto('/workspace/');
 	await expect(page.getByRole('heading', { name: 'Operator sign-in' })).toBeVisible();
 
-	// A wrong password is refused and announced.
-	await page.getByLabel('Password').fill('not the password');
+	// Keyboard only, from the top of the page: Tab to the field, type, Enter.
+	await tabTo(page, (el) => el.id === 'password');
+	expect(await focusIsVisible(page)).toBe(true);
+	await page.keyboard.type('not the password');
 	await page.keyboard.press('Enter');
+	// A wrong password is refused and announced.
 	await expect(page.getByRole('alert')).toContainText('That password is not right.');
 	await expect(page.getByLabel('Password')).toHaveAttribute('aria-invalid', 'true');
-
-	// Keyboard only: focus the field, type, submit with Enter.
-	await page.getByLabel('Password').fill('');
-	await page.getByLabel('Password').focus();
+	// Still in the field: select what was typed, replace it, Enter.
+	await page.keyboard.press('ControlOrMeta+A');
 	await page.keyboard.type(password);
 	await page.keyboard.press('Enter');
 
@@ -39,7 +59,10 @@ test('the operator signs in with the keyboard alone, reads the inbox and signs o
 	const overflow = await page.evaluate(() => document.documentElement.scrollWidth - window.innerWidth);
 	expect(overflow).toBeLessThanOrEqual(0);
 
-	await page.getByRole('button', { name: 'Sign out' }).click();
+	// Sign out with the keyboard too.
+	await tabTo(page, (el) => el.textContent?.trim() === 'Sign out');
+	expect(await focusIsVisible(page)).toBe(true);
+	await page.keyboard.press('Enter');
 	await expect(page.getByRole('heading', { name: 'Operator sign-in' })).toBeVisible();
 	// The session is gone on the server too.
 	const after = await page.request.get('/v1/operator/leads');

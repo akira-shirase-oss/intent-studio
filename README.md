@@ -39,6 +39,10 @@ These need the maintainer or an outside party; everything else is decided in
   or delays a stored lead.
 - The operator inbox at `/workspace` (SvelteKit + Tailwind v4 +
   shadcn-svelte), behind an argon2id password session.
+- Not built yet (I3, D-033): CORS and the no-script redirect for published
+  sites, the hourly notification digest, manual resend of a `dead`
+  notification, and retention — leads carry `retain_until`, but nothing
+  purges them or deletes one on request yet.
 - Drills against the real binary: provider down, provider never
   recovering, a lost answer after acceptance, `kill -9` mid-request, and
   PostgreSQL stopped mid-run — each ending in a log-capture check for lead

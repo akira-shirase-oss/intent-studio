@@ -39,6 +39,13 @@ row): delivery is at least once. After 8 attempts, or a permanent provider
 refusal, the row is `dead` and stays visible in the inbox; the lead is
 untouched.
 
+## Retention (not built yet)
+
+Each lead stores its own `retain_until` (365 days by default, per tenant,
+D-019/D-031). Nothing deletes leads yet: the purge of leads past
+`retain_until` and deletion on request arrive at I3 (D-033). Until then a
+lead stays until removed by hand.
+
 ## Lead states
 
 `received` (memory only, never acknowledged) → `stored` (committed with its
@@ -61,5 +68,5 @@ transition table and its tests.
 | `kill -9` mid-request: every acknowledged lead durable, lost answers resend as the same lead, expired leases delivered | `drill_kill::kill_9_mid_request_loses_no_acknowledged_lead` |
 | Postgres stopped mid-run: 503 + `Retry-After` only, readiness red then green, no loss after restart | `drill_db_down::db_down_refuses_honestly_and_recovers_without_loss` |
 | No secret or lead content in any drill's log; the scanner catches a planted leak | `support::assert_no_leaks`, at the end of every drill |
-| The inbox in Chromium at 1280 and 360 px, keyboard only | `scripts/workspace-e2e.sh` |
+| The inbox in Chromium at 1280 and 360 px: signed in and out with Tab and Enter only, focus visible; CSP with zero violations | `scripts/workspace-e2e.sh` |
 | Load with the provider down, every acknowledgment reconciled | `scripts/load.sh`, results in `perf/results/` |
