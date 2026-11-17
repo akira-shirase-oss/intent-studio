@@ -79,6 +79,22 @@ busy laptop, never capacity):
   delivered after recovery with 0 duplicates; p99 109 ms and 771 dropped
   iterations — misses at load average 16–78.
 
+Fix round (2026-11-17), after an independent review; each fix with a test
+that failed first, `scripts/check.sh` green and CI confirmed: connection
+bounds and no body read before the cheap refusals (D-038); the site budget
+spent only by storable leads for real sites (D-039); every
+`X-Forwarded-For` line read; outbox records fenced per claim (D-040); the
+notifier on its own pool for every query, sized for its concurrency
+(D-048), and readiness on its own connection (D-047); operator sign-in
+hardened (D-041); bidi and invisible characters refused (D-042); CSP and
+framing protection (D-043); the consent notice version stored (D-044); the
+recorder refused outside development (D-045); provider answers retried by
+class (D-046); `/metrics` restricted (D-049); an argon2id floor (D-050);
+scripts that run the binaries cargo built; a leak check that proves every
+needle; grouped imports in the architecture check. The load results above
+predate the fix round and were not rerun (the machine stayed at load
+average 13–45).
+
 Owed before *Done*: realism and burst on a quiet machine (`uptime` below
 about 6) and the intake budget set from them in a decision entry; the
 100,000-submission `notify-down` smoke against that budget. Owed by I3: the

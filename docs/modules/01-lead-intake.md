@@ -69,4 +69,13 @@ transition table and its tests.
 | Postgres stopped mid-run: 503 + `Retry-After` only, readiness red then green, no loss after restart | `drill_db_down::db_down_refuses_honestly_and_recovers_without_loss` |
 | No secret or lead content in any drill's log; the scanner catches a planted leak | `support::assert_no_leaks`, at the end of every drill |
 | The inbox in Chromium at 1280 and 360 px: signed in and out with Tab and Enter only, focus visible; CSP with zero violations | `scripts/workspace-e2e.sh` |
+| Slow headers, idle sockets and stalled readers are cut off; connections capped; a rate-limited body is never read (D-038) | `connections::*` (4 tests) |
+| The site budget is spent only by storable leads for real sites; made-up sites create no rows (D-039) | `intake::only_storable_leads_from_known_sites_spend_the_site_budget` |
+| Every `X-Forwarded-For` line counts, read from the right | `intake::every_forwarded_for_line_counts_so_a_client_cannot_pick_its_own_address` |
+| A late result from an expired claim never overwrites the current one; rows nobody holds are swept (D-040) | `outbox_fencing::*` (2 tests) |
+| The notifier uses only its own pool; readiness has its own connection (D-034, D-047) | `notifier_pool::the_notifier_never_touches_intakes_pool`, `readiness::readiness_stays_green_while_intakes_pool_is_saturated` |
+| Sign-in: global budget, audit with actor/address/request id, `__Host-` cookie, idle timeout (D-041) | `operator::*` (2 tests) |
+| Bidi controls and invisible characters refused; the consent notice version stored (D-042, D-044) | `lead::tests::bidi_controls_and_invisible_characters_are_refused`, `intake::the_consent_notice_version_is_required_and_stored_with_the_lead` |
+| `/metrics` only for the host or a token holder (D-049) | `intake::metrics_are_for_the_host_or_a_token_holder_only` |
+| The leak check proves every needle it is given | `log_scanner::*` |
 | Load with the provider down, every acknowledgment reconciled | `scripts/load.sh`, results in `perf/results/` |
