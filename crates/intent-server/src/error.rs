@@ -45,7 +45,7 @@ pub enum ApiError {
     SubmissionConflict,
     /// 503 with `Retry-After`: the database cannot take it. Nothing was acknowledged.
     #[error(
-        "the lead could not be saved right now; it was not acknowledged, retry with the same submission id"
+        "the lead was not acknowledged because the database did not confirm it; resend with the same submission id (a lead that was saved is returned, never stored twice)"
     )]
     Unavailable(#[source] Option<DbError>),
     /// 503 with `Retry-After`: shed before doing any work.
@@ -265,4 +265,30 @@ fn is_json(response: &Response) -> bool {
         .get(header::CONTENT_TYPE)
         .and_then(|v| v.to_str().ok())
         .is_some_and(|v| v.starts_with("application/json"))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_503_never_claims_the_lead_was_not_saved() {
+        // The commit may have landed and only its answer been lost: a 503 can promise that
+        // nothing was acknowledged and that a resend is safe, never that nothing was saved.
+        for error in [
+            ApiError::Unavailable(None),
+            ApiError::Timeout,
+            ApiError::Overloaded,
+        ] {
+            let message = error.to_string();
+            assert_eq!(error.status(), StatusCode::SERVICE_UNAVAILABLE);
+            assert!(!message.contains("could not be saved"), "{message}");
+            assert!(!message.contains("was not saved"), "{message}");
+        }
+        for error in [ApiError::Unavailable(None), ApiError::Timeout] {
+            let message = error.to_string();
+            assert!(message.contains("not acknowledged"), "{message}");
+            assert!(message.contains("same submission id"), "{message}");
+        }
+    }
 }
