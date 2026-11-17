@@ -525,6 +525,23 @@ starting values; changing one needs a measurement and a new entry.
   and `the_operators_known_address_gets_through_a_distributed_flood`
   (both failed before the change) and the `SignInGate` unit tests.
 
+- **D-053 — The per-address connection default is a quarter of the cap.**
+  `INTENT_MAX_CONNECTIONS_PER_ADDRESS` defaults to `min(64, max(1, cap/4))`
+  instead of `min(64, cap)`: at a small cap (20) the old default let one
+  address hold every connection and lock newcomers out, which D-051 was
+  meant to prevent. Proven by
+  `config::tests::one_address_gets_at_most_a_quarter_of_a_small_cap`, which
+  failed before the change (20 of 20). What this does not cover: at the
+  default cap of 1,024, 16 IPv6 /64s fill every connection, and a single
+  subscriber often holds a /56 or /48 (256 to 65,536 /64s), so the
+  per-address limit alone does not stop one determined IPv6 client from
+  taking the cap; its connections still close at the 10 s idle timeout and
+  the 5-minute age (D-038, D-051), and each serves at most 1,000 requests.
+  Kept for now, unmeasured: keying the connection count by a wider IPv6
+  prefix (/48) would also group unrelated users behind one provider's
+  allocation, and lowering 64 would hurt clients behind carrier-grade
+  NAT. Listed under the open questions until a measurement decides it.
+
 ## Open questions (still open)
 
 These need the maintainer or an outside party; each is in the README's
@@ -537,5 +554,9 @@ These need the maintainer or an outside party; each is in the README's
 - **Privacy notice and data processing (B-3).** The notice text on each
   client's form and the agreement under which the operator processes their
   customers' leads (D-019); counsel if a client asks for it.
+- **Connections per IPv6 client (D-053).** Whether the connection count
+  should be keyed by a /48 (or the default cap or the 64-per-address limit
+  changed) so one IPv6 subscriber cannot fill the cap with 16 /64s; needs
+  a measurement of real client spread before it is decided.
 - **Deploy access per client (B-4).** The client's own Cloudflare account
   or the operator-account fallback (D-017).

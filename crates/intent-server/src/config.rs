@@ -340,7 +340,7 @@ impl Config {
             ),
             max_per_address: usize::try_from(env.ranged(
                 "INTENT_MAX_CONNECTIONS_PER_ADDRESS",
-                u64::try_from(max_connections.min(64)).unwrap_or(64),
+                u64::try_from((max_connections / 4).clamp(1, 64)).unwrap_or(64),
                 1..=100_000,
             ))
             .unwrap_or(64),
@@ -606,6 +606,21 @@ mod tests {
             .unwrap_err()
             .to_string();
         assert!(garbage.contains("not a valid"), "{garbage}");
+    }
+
+    #[test]
+    fn one_address_gets_at_most_a_quarter_of_a_small_cap() {
+        let per_address = |cap: &str| {
+            let mut pairs = MINIMAL.to_vec();
+            pairs.push(("INTENT_MAX_CONNECTIONS", cap));
+            config(&pairs).unwrap().connections.max_per_address
+        };
+        // At a cap of 20, one address may not take all 20 and lock newcomers out.
+        assert_eq!(per_address("20"), 5);
+        assert_eq!(per_address("1024"), 64);
+        assert_eq!(per_address("100"), 25);
+        assert_eq!(per_address("2"), 1);
+        assert_eq!(per_address("1"), 1);
     }
 
     #[test]

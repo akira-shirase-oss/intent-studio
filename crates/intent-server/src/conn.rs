@@ -64,7 +64,9 @@ pub struct ConnectionLimits {
     pub max_requests_per_connection: u32,
     /// Longest a connection lives; then it finishes its current request and closes.
     pub max_age: Duration,
-    /// Connections one client address (an IPv6 /64) may hold; trusted proxies are exempt.
+    /// Connections one client address (an IPv6 /64) may hold; trusted proxies are exempt. By
+    /// default a quarter of `max_connections`, at most 64 (D-053): 16 IPv6 /64s, which one
+    /// subscriber may well have, fill the default cap of 1,024.
     pub max_per_address: usize,
 }
 

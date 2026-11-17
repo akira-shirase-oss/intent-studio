@@ -125,6 +125,8 @@ async fn open_connections_are_capped() {
         &fixture,
         &[
             ("INTENT_MAX_CONNECTIONS", "8"),
+            // All eight from one address: this test is about the global cap.
+            ("INTENT_MAX_CONNECTIONS_PER_ADDRESS", "8"),
             ("INTENT_HEADER_READ_TIMEOUT_MS", "1500"),
         ],
     )
