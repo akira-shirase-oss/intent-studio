@@ -50,6 +50,16 @@ pub enum LogFormat {
     Pretty,
 }
 
+/// Where the server runs. Production is the default: development-only conveniences must be
+/// asked for by name.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Profile {
+    /// The default.
+    Production,
+    /// A developer's machine or a test: allows the in-memory recorder provider.
+    Development,
+}
+
 /// Which notification provider adapter to use.
 #[derive(Debug, Clone)]
 pub enum ProviderConfig {
@@ -83,6 +93,8 @@ pub struct NotifyConfig {
 /// The whole configuration.
 #[derive(Debug, Clone)]
 pub struct Config {
+    /// `INTENT_PROFILE`: `production` (default) or `development`.
+    pub profile: Profile,
     /// Listen address.
     pub bind: SocketAddr,
     /// PostgreSQL URL (contains the password).
@@ -220,6 +232,16 @@ impl Config {
             lookup,
             problems: Vec::new(),
         };
+        let profile = match env.raw("INTENT_PROFILE").as_deref().map(str::trim) {
+            None | Some("production") => Profile::Production,
+            Some("development") => Profile::Development,
+            Some(other) => {
+                env.problems.push(format!(
+                    "INTENT_PROFILE: expected `production` or `development`, got {other:?}"
+                ));
+                Profile::Production
+            }
+        };
         let bind = env.parse("INTENT_BIND", SocketAddr::from(([127, 0, 0, 1], 59400)));
         let database_url = env.secret("INTENT_DATABASE_URL");
         if database_url.is_none() && env.raw("INTENT_DATABASE_URL").is_none() {
@@ -313,7 +335,16 @@ impl Config {
                     ProviderConfig::Recorder
                 }
             }
-            Some("recorder") => ProviderConfig::Recorder,
+            Some("recorder") => {
+                // The recorder accepts and forgets every notification: in production that would
+                // be a provider that silently delivers nothing.
+                if profile != Profile::Development {
+                    env.problems.push(
+                        "INTENT_NOTIFY_PROVIDER=recorder discards notifications and is for development only (set INTENT_PROFILE=development)".into(),
+                    );
+                }
+                ProviderConfig::Recorder
+            }
             Some(other) => {
                 env.problems.push(format!(
                     "INTENT_NOTIFY_PROVIDER: expected `webhook` or `recorder`, got {other:?}"
@@ -410,6 +441,7 @@ impl Config {
 
         match database_url {
             Some(database_url) if env.problems.is_empty() => Ok(Self {
+                profile,
                 bind,
                 database_url,
                 db,
@@ -459,13 +491,43 @@ mod tests {
         Config::from_lookup(move |key| map.get(key).cloned())
     }
 
-    const MINIMAL: [(&str, &str); 2] = [
+    const MINIMAL: [(&str, &str); 3] = [
         (
             "INTENT_DATABASE_URL",
             "postgres://u:hunter2@127.0.0.1:59432/intent",
         ),
         ("INTENT_NOTIFY_PROVIDER", "recorder"),
+        ("INTENT_PROFILE", "development"),
     ];
+
+    #[test]
+    fn the_recorder_is_refused_outside_development() {
+        let url = (
+            "INTENT_DATABASE_URL",
+            "postgres://u:p@127.0.0.1:59432/intent",
+        );
+        let text = config(&[url, ("INTENT_NOTIFY_PROVIDER", "recorder")])
+            .unwrap_err()
+            .to_string();
+        assert!(
+            text.contains("recorder") && text.contains("INTENT_PROFILE=development"),
+            "{text}"
+        );
+        assert!(
+            config(&[
+                url,
+                ("INTENT_NOTIFY_PROVIDER", "recorder"),
+                ("INTENT_PROFILE", "development")
+            ])
+            .is_ok()
+        );
+        let unknown = config(&[
+            url,
+            ("INTENT_NOTIFY_PROVIDER", "recorder"),
+            ("INTENT_PROFILE", "staging"),
+        ]);
+        assert!(unknown.unwrap_err().to_string().contains("INTENT_PROFILE"));
+    }
 
     #[test]
     fn defaults_follow_the_decisions() {

@@ -440,6 +440,14 @@ starting values; changing one needs a measurement and a new entry.
   (it failed before the change: the field was refused as unknown) and the
   domain's validation tests.
 
+- **D-045 — A development profile, and the recorder only in it.**
+  `INTENT_PROFILE` is `production` (the default) or `development`. The
+  in-memory `recorder` provider accepts and forgets every notification, so
+  in production it would be a provider that silently delivers nothing: it
+  is refused unless the profile is `development`. Proven by
+  `config::tests::the_recorder_is_refused_outside_development`, which
+  failed before the change.
+
 ## Open questions (still open)
 
 These need the maintainer or an outside party; each is in the README's

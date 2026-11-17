@@ -20,7 +20,7 @@ INTENT_DATABASE_URL="$url" target/release/intent-server seed --sites 2
 hash="$(printf '%s\n' "$password" | target/release/intent-server hash-password)"
 
 log="$(mktemp)"
-INTENT_DATABASE_URL="$url" INTENT_BIND="127.0.0.1:$port" INTENT_NOTIFY_PROVIDER=recorder \
+INTENT_DATABASE_URL="$url" INTENT_BIND="127.0.0.1:$port" INTENT_NOTIFY_PROVIDER=recorder INTENT_PROFILE=development \
     INTENT_OPERATOR_PASSWORD_HASH="$hash" INTENT_COOKIE_SECURE=false \
     INTENT_WORKSPACE_DIR=apps/workspace/build INTENT_NOTIFY_POLL_MS=50 \
     target/release/intent-server serve >"$log" 2>&1 &

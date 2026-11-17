@@ -46,6 +46,7 @@ async fn the_notifier_never_touches_intakes_pool() {
     let env: HashMap<&str, String> = HashMap::from([
         ("INTENT_DATABASE_URL", test.url.clone()),
         ("INTENT_NOTIFY_PROVIDER", "recorder".to_owned()),
+        ("INTENT_PROFILE", "development".to_owned()),
         ("INTENT_NOTIFY_POLL_MS", "20".to_owned()),
     ]);
     let config = Config::from_lookup(|key| env.get(key).cloned()).unwrap();
