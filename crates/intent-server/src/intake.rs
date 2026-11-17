@@ -74,12 +74,6 @@ pub async fn submit(
             retry_after_secs: secs,
         });
     }
-    if let Err(RetryAfter(secs)) = app.site_limiter.check(site, now) {
-        Metrics::inc(&metrics.intake_rate_limited_site_total);
-        return Err(ApiError::RateLimited {
-            retry_after_secs: secs,
-        });
-    }
 
     let body = read_body(body).await?;
     let form =
@@ -95,6 +89,20 @@ pub async fn submit(
         }
     })?;
 
+    // The site's budget is spent only by a storable lead for a site that accepts leads: a bot's
+    // honeypot post, an invalid form or a made-up site id costs it nothing, and an unknown site
+    // never gets a rate-limit row.
+    let accepts = within_deadline(&app, app.sites.accepts(&app.db, site)).await?;
+    if !accepts {
+        return Err(ApiError::UnknownSite);
+    }
+    if let Err(RetryAfter(secs)) = app.site_limiter.check(site, app.now_ms()) {
+        Metrics::inc(&metrics.intake_rate_limited_site_total);
+        return Err(ApiError::RateLimited {
+            retry_after_secs: secs,
+        });
+    }
+
     let received_at = OffsetDateTime::now_utc();
     let content = fingerprint(&lead);
     let keys = keys_for(site, &lead, &content, received_at.unix_timestamp());
@@ -108,23 +116,14 @@ pub async fn submit(
         lead: &lead,
         received_at,
     };
-    let outcome =
-        match tokio::time::timeout(app.config.intake_deadline, app.db.store_lead(&new)).await {
-            Err(_elapsed) => {
-                // The commit may or may not have happened; either way nothing is acknowledged, and
-                // a resend with the same submission id finds the lead if it did.
-                Metrics::inc(&metrics.intake_timeouts_total);
-                return Err(ApiError::Timeout);
-            }
-            Ok(Err(error)) => {
-                if error.is_unavailable() {
-                    Metrics::inc(&metrics.intake_unavailable_total);
-                }
-                return Err(error.into());
-            }
-            Ok(Ok(outcome)) => outcome,
-        };
+    // Past the deadline the commit may or may not have happened; either way nothing is
+    // acknowledged, and a resend with the same submission id finds the lead if it did.
+    let outcome = within_deadline(&app, app.db.store_lead(&new)).await?;
     let submission_id = keys.primary.public().to_owned();
+    if !matches!(outcome, StoreOutcome::Created(_)) {
+        // Not a new lead (a replay, a conflict, a site closed meanwhile): its token goes back.
+        app.site_limiter.refund(site);
+    }
     match outcome {
         StoreOutcome::Created(lead_id) => {
             Metrics::inc(&metrics.leads_created_total);
@@ -170,6 +169,26 @@ fn acknowledge(
         header::HeaderValue::from_static("no-store"),
     );
     response
+}
+
+/// Runs a database call under the intake deadline, counting timeouts and outages.
+async fn within_deadline<T>(
+    app: &App,
+    call: impl Future<Output = Result<T, intent_db::DbError>>,
+) -> Result<T, ApiError> {
+    match tokio::time::timeout(app.config.intake_deadline, call).await {
+        Err(_elapsed) => {
+            Metrics::inc(&app.metrics.intake_timeouts_total);
+            Err(ApiError::Timeout)
+        }
+        Ok(Err(error)) => {
+            if error.is_unavailable() {
+                Metrics::inc(&app.metrics.intake_unavailable_total);
+            }
+            Err(error.into())
+        }
+        Ok(Ok(value)) => Ok(value),
+    }
 }
 
 /// Reads a request body of at most [`MAX_BODY_BYTES`]; the request timeout bounds how long.

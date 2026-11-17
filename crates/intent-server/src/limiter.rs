@@ -69,6 +69,17 @@ impl<K: Hash + Eq + Copy> Limiter<K> {
         result
     }
 
+    /// Gives back the token a request took, if its key is still held.
+    pub fn refund(&self, key: K) {
+        let shard = &self.shards[self.shard_of(&key)];
+        let mut table = shard
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if let Some(bucket) = table.get_mut(&key) {
+            bucket.refund(self.quota);
+        }
+    }
+
     fn shard_of(&self, key: &K) -> usize {
         // The modulo keeps the index in range whatever the hash.
         usize::try_from(self.hasher.hash_one(key) % SHARDS as u64).unwrap_or(0)
@@ -118,6 +129,17 @@ mod tests {
             "other keys are independent"
         );
         assert_eq!(limiter.refusals(), 1);
+    }
+
+    #[test]
+    fn a_refund_gives_one_token_back() {
+        let limiter = Limiter::new(Quota::per_minute(1).unwrap(), 1_000);
+        assert!(limiter.check(7_u32, 0).is_ok());
+        assert!(limiter.check(7_u32, 0).is_err());
+        limiter.refund(7);
+        assert!(limiter.check(7_u32, 0).is_ok());
+        limiter.refund(8); // an unknown key: nothing is created
+        assert_eq!(limiter.len(), 1);
     }
 
     #[test]

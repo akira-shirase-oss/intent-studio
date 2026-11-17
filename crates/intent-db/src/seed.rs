@@ -53,6 +53,15 @@ impl Db {
         Ok(())
     }
 
+    /// Whether a site exists (`Some`) and accepts leads (`true`).
+    pub async fn site_accepts_leads(&self, site: SiteId) -> Result<Option<bool>, DbError> {
+        sqlx::query_scalar("SELECT accepting_leads FROM sites WHERE id = $1")
+            .bind(site.as_uuid())
+            .fetch_optional(&self.pool)
+            .await
+            .map_err(classify)
+    }
+
     /// Stops or resumes a site's intake (used by tests of the unknown/closed-site refusal).
     pub async fn set_accepting(&self, site: SiteId, accepting: bool) -> Result<(), DbError> {
         sqlx::query("UPDATE sites SET accepting_leads = $2 WHERE id = $1")

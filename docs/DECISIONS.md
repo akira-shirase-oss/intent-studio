@@ -368,6 +368,18 @@ starting values; changing one needs a measurement and a new entry.
   `a_client_that_stops_reading_is_cut_off`, each failing before the
   change. Cost: a client may keep a connection idle for at most 10 s.
 
+- **D-039 — What spends a site's budget.** The per-site bucket (60 a
+  minute, D-019) is charged only for a lead that validated and whose site
+  accepts leads, and a replay or a conflict refunds its token. The site is
+  checked against a bounded cache of sites verified to accept leads (a
+  miss costs one primary-key lookup; unknown and closed sites are never
+  cached), so a made-up site id is a 404 that creates no rate-limit row.
+  Reason: charging before validation let a bot's honeypot posts lock a
+  real site's visitors out, and random site ids grew the table. Proven by
+  `intake::only_storable_leads_from_known_sites_spend_the_site_budget`,
+  which failed before the change. The per-address bucket still charges
+  every request: that is the one a flood has to get through first.
+
 ## Open questions (still open)
 
 These need the maintainer or an outside party; each is in the README's

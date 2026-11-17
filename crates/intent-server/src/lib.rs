@@ -17,4 +17,5 @@ pub mod notifier;
 pub mod operator;
 pub mod reconcile;
 pub mod serve;
+pub mod sites;
 pub mod telemetry;

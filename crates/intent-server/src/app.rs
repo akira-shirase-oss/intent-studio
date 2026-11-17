@@ -62,6 +62,8 @@ pub struct Inner {
     pub sign_in_limiter: Limiter<AddressKey>,
     /// Concurrent password hashes (CPU-bound, run off the async workers).
     pub hash_gate: Arc<Semaphore>,
+    /// Sites verified to accept leads (the per-site budget is charged only for these).
+    pub sites: crate::sites::SiteDirectory,
     /// Connection counters, kept by the accept loop.
     pub connections: Arc<crate::conn::ConnectionStats>,
     started: Instant,
@@ -87,6 +89,7 @@ impl App {
             sign_in_limiter: Limiter::new(sign_in_quota, 10_000),
             hash_gate: Arc::new(Semaphore::new(2)),
             connections: Arc::new(crate::conn::ConnectionStats::default()),
+            sites: crate::sites::SiteDirectory::new(100_000, std::time::Duration::from_secs(60)),
             metrics: Metrics::default(),
             started: Instant::now(),
             config,

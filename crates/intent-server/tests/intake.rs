@@ -543,3 +543,121 @@ async fn sigterm_drains_and_exits_cleanly() {
     assert!(log.contains("\"outcome\":\"Graceful\""), "{log}");
     db.drop_database().await;
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "needs the stack: scripts/stack.sh up (run by scripts/drills.sh)"]
+async fn only_storable_leads_from_known_sites_spend_the_site_budget() {
+    let db = TestDb::create(2).await;
+    let fixture = ProviderFixture::start(Mode::Ok).await;
+    let mut env = drill_env(&db, &fixture.url);
+    env.push(("INTENT_TRUSTED_PROXIES".into(), "127.0.0.1".into()));
+    let server = Server::start(env).await;
+    let client = client();
+    let clock = Instant::now();
+    let site = site_for(0, 2);
+    let metrics = |client: reqwest::Client, base: String| async move {
+        client
+            .get(format!("{base}/metrics"))
+            .send()
+            .await
+            .unwrap()
+            .text()
+            .await
+            .unwrap()
+    };
+
+    // Random site ids: refused, and no rate-limit row for any of them.
+    for n in 0..20_u64 {
+        let outcome = submit(
+            &client,
+            &server.base,
+            uuid::Uuid::now_v7(),
+            &LeadSpec::new("ghost", n).json(),
+            Some(&format!("10.40.0.{n}")),
+            n,
+            clock,
+        )
+        .await;
+        assert_eq!(outcome.status, Some(404));
+    }
+    let text = metrics(client.clone(), server.base.clone()).await;
+    assert!(
+        text.contains("intent_rate_table_site_keys 0\n"),
+        "unknown sites created rows:\n{text}"
+    );
+
+    // 60 honeypot posts and 60 invalid ones (12 + 12 addresses, 5 each), then a genuine lead:
+    // none of the refused ones may have spent the site's 60 tokens.
+    for n in 0..60_u64 {
+        let mut bot = LeadSpec::new("bot", n).json();
+        bot["website"] = "http://spam.example".into();
+        let outcome = submit(
+            &client,
+            &server.base,
+            site,
+            &bot,
+            Some(&format!("10.41.0.{}", n / 5)),
+            n,
+            clock,
+        )
+        .await;
+        assert_eq!(outcome.status, Some(400));
+        let mut invalid = LeadSpec::new("invalid", n).json();
+        invalid["consent"] = false.into();
+        let outcome = submit(
+            &client,
+            &server.base,
+            site,
+            &invalid,
+            Some(&format!("10.42.0.{}", n / 5)),
+            n,
+            clock,
+        )
+        .await;
+        assert_eq!(outcome.status, Some(422));
+    }
+    let genuine = submit(
+        &client,
+        &server.base,
+        site,
+        &LeadSpec::new("genuine", 1).json(),
+        Some("10.43.0.1"),
+        1,
+        clock,
+    )
+    .await;
+    assert_eq!(
+        genuine.status,
+        Some(201),
+        "a genuine lead was refused after bots spent the site budget"
+    );
+
+    // Replays of a stored lead do not spend it either: 70 resubmissions, then a new lead.
+    for n in 0..70_u64 {
+        let replay = submit(
+            &client,
+            &server.base,
+            site,
+            &LeadSpec::new("genuine", 1).json(),
+            Some(&format!("10.44.{}.{}", n / 5, n % 5)),
+            1,
+            clock,
+        )
+        .await;
+        assert_eq!(replay.status, Some(200), "replay {n}");
+    }
+    let next = submit(
+        &client,
+        &server.base,
+        site,
+        &LeadSpec::new("genuine", 2).json(),
+        Some("10.45.0.1"),
+        2,
+        clock,
+    )
+    .await;
+    assert_eq!(next.status, Some(201), "replays drained the site budget");
+    let text = metrics(client.clone(), server.base.clone()).await;
+    assert!(text.contains("intent_rate_table_site_keys 1\n"), "{text}");
+    db.drop_database().await;
+}

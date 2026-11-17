@@ -69,6 +69,17 @@ impl TokenBucket {
     }
 }
 
+impl TokenBucket {
+    /// Gives back one token taken for a request that turned out not to count (a replay of a
+    /// stored lead, a conflict), never above the burst.
+    pub fn refund(&mut self, quota: Quota) {
+        self.level = self
+            .level
+            .saturating_add(UNITS_PER_TOKEN)
+            .min(quota.capacity());
+    }
+}
+
 /// The address a request is limited by.
 ///
 /// The peer address, unless the peer is a configured proxy: then `X-Forwarded-For` is read from
@@ -190,6 +201,26 @@ mod tests {
         }
         assert!(bucket.try_take(five(), 0).is_err());
         assert!(bucket.try_take(five(), 10_000).is_err());
+    }
+
+    #[test]
+    fn a_refund_returns_one_token_and_never_exceeds_the_burst() {
+        let mut bucket = TokenBucket::full(five(), 0);
+        for _ in 0..5 {
+            bucket.try_take(five(), 0).unwrap();
+        }
+        bucket.refund(five());
+        assert_eq!(bucket.try_take(five(), 0), Ok(()));
+        assert!(bucket.try_take(five(), 0).is_err());
+        let mut full = TokenBucket::full(five(), 0);
+        full.refund(five());
+        for _ in 0..5 {
+            full.try_take(five(), 0).unwrap();
+        }
+        assert!(
+            full.try_take(five(), 0).is_err(),
+            "a refund on a full bucket adds nothing"
+        );
     }
 
     #[test]
