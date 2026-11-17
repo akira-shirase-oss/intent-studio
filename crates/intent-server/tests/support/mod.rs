@@ -184,10 +184,17 @@ mod tokio_util_stop {
 
 impl ProviderFixture {
     pub async fn start(mode: Mode) -> Self {
-        let port = free_port();
-        let listener = tokio::net::TcpListener::bind(("127.0.0.1", port))
-            .await
-            .unwrap();
+        // On macOS an outgoing connection may take a probed port (its local port comes from
+        // the same range) before this bind: try another.
+        let mut bound = None;
+        for _ in 0..20 {
+            let port = free_port();
+            if let Ok(listener) = tokio::net::TcpListener::bind(("127.0.0.1", port)).await {
+                bound = Some((port, listener));
+                break;
+            }
+        }
+        let (port, listener) = bound.expect("no port in 59410..=59479 could be bound");
         let fixture = Fixture::new(mode, Duration::from_secs(30));
         let (tx, rx) = tokio::sync::oneshot::channel::<()>();
         let served = fixture.clone();
@@ -239,23 +246,64 @@ pub fn drill_env(db: &TestDb, provider_url: &str) -> Vec<(String, String)> {
 }
 
 impl Server {
-    pub async fn start(mut env: Vec<(String, String)>) -> Self {
-        let port = free_port();
-        let address: SocketAddr = format!("127.0.0.1:{port}").parse().unwrap();
-        env.push(("INTENT_BIND".into(), address.to_string()));
+    pub async fn start(env: Vec<(String, String)>) -> Self {
         let dir = std::env::temp_dir().join(format!("intent-drill-{}", Uuid::now_v7().simple()));
         std::fs::create_dir_all(&dir).unwrap();
-        let mut server = Self {
-            child: None,
-            address,
-            base: format!("http://{address}"),
-            log_path: dir.join("server.log"),
-            env,
-            restarts: 0,
-        };
-        server.spawn();
-        server.wait_ready(Duration::from_secs(20)).await;
-        server
+        // A probed port can be taken by an outgoing connection before the server binds it
+        // (macOS gives local ports from the same range): if the server cannot bind, it exits
+        // at once, and the next port is tried.
+        for _ in 0..5 {
+            let port = free_port();
+            let address: SocketAddr = format!("127.0.0.1:{port}").parse().unwrap();
+            let mut env = env.clone();
+            env.push(("INTENT_BIND".into(), address.to_string()));
+            let mut server = Self {
+                child: None,
+                address,
+                base: format!("http://{address}"),
+                log_path: dir.join("server.log"),
+                env,
+                restarts: 0,
+            };
+            server.spawn();
+            if server.became_ready(Duration::from_secs(20)).await {
+                return server;
+            }
+            server.kill();
+        }
+        panic!(
+            "the server never started:\n{}",
+            std::fs::read_to_string(dir.join("server.log")).unwrap_or_default()
+        );
+    }
+
+    /// Waits for readiness; false if the process exited first (e.g. its port was taken).
+    async fn became_ready(&mut self, limit: Duration) -> bool {
+        let client = reqwest::Client::new();
+        let start = Instant::now();
+        loop {
+            if let Some(child) = self.child.as_mut()
+                && child.try_wait().ok().flatten().is_some()
+            {
+                self.child = None;
+                return false;
+            }
+            if let Ok(r) = client
+                .get(format!("{}/readyz", self.base))
+                .timeout(Duration::from_secs(1))
+                .send()
+                .await
+                && r.status() == 200
+            {
+                return true;
+            }
+            assert!(
+                start.elapsed() < limit,
+                "server not ready after {limit:?}:\n{}",
+                self.log()
+            );
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
     }
 
     fn spawn(&mut self) {
@@ -364,6 +412,7 @@ impl LeadSpec {
             "phone": self.phone,
             "message": self.message,
             "consent": true,
+            "consent_notice": "privacy-v1",
         })
     }
 
