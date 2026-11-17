@@ -75,6 +75,14 @@ if [ -d "$domain" ]; then
     [ ! -e "$domain/build.rs" ] || fail "A1 intent-domain must not have a build script"
     calls="$(grep -rnE 'std::fs|std::process|std::env|TcpStream|TcpListener|UdpSocket|thread::sleep|SystemTime::now|Instant::now|File::(open|create)|tokio::' "$domain/src" || true)"
     [ -z "$calls" ] || fail "A1 intent-domain source performs I/O:"$'\n'"$calls"
+    # Grouped imports (`use std::{fs, io};`, also across lines) name the module without the
+    # `std::fs` spelling: join each file into one line and look inside every `std::{...}` group.
+    grouped="$(find "$domain/src" -name '*.rs' -print0 | while IFS= read -r -d '' file; do
+        tr '\n' ' ' <"$file" | grep -oE 'std::\{[^;]*\}' \
+            | grep -E '(^|[^A-Za-z0-9_])(fs|process|env|thread)([^A-Za-z0-9_]|$)|Tcp|Udp' \
+            | sed "s|^|$file: |" || true
+    done)"
+    [ -z "$grouped" ] || fail "A1 intent-domain imports I/O in a grouped use:"$'\n'"$grouped"
     # Transitive: what Cargo actually resolves (only in a real, locked workspace).
     if [ -f Cargo.lock ] && command -v cargo >/dev/null 2>&1; then
         resolved="$(cargo tree --locked --quiet -p intent-domain -e normal,build --prefix none --format '{p}' 2>/dev/null \
