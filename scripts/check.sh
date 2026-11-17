@@ -28,7 +28,20 @@ scripts/test-architecture-check.sh
 
 step supply-chain
 if command -v cargo-deny >/dev/null 2>&1; then
-    cargo deny --locked check
+    deny_log="$(mktemp)"
+    if ! cargo deny --locked check 2>"$deny_log"; then
+        if grep -q 'failed to fetch advisory database' "$deny_log"; then
+            # Offline (the advisory database could not be refreshed): check against the cached
+            # copy and say so. CI always fetches a fresh one.
+            echo "NOTICE: advisory database unreachable; checking against the cached copy" >&2
+            cargo deny --locked --offline check
+        else
+            cat "$deny_log" >&2
+            rm -f "$deny_log"
+            exit 1
+        fi
+    fi
+    rm -f "$deny_log"
 else
     echo "cargo-deny not installed: skipped here (CI runs it in its own job)"
 fi
