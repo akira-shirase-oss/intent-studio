@@ -61,6 +61,10 @@ pub struct AttemptRecord {
     pub id: OutboxId,
     /// The lease holder that made the attempt.
     pub owner: Uuid,
+    /// The attempt number the claim was given. Together with `owner` it fences the record: a
+    /// late result from an earlier claim of the same row (even by the same process) no longer
+    /// matches and is discarded.
+    pub attempt: u8,
     /// How the attempt ended.
     pub outcome: AttemptOutcome,
     /// What the schedule decided.
@@ -108,16 +112,18 @@ SET state = $3,
     uncertain_attempts = uncertain_attempts + $6,
     lease_owner = NULL,
     lease_expires_at = NULL
-WHERE id = $1 AND lease_owner = $2 AND state = 'pending'";
+WHERE id = $1 AND lease_owner = $2 AND attempts = $7 AND state = 'pending'";
 
-/// Rows that used their last attempt and then lost the lease (the process died mid-attempt):
-/// the outcome is unknown and no attempt is left, so they are dead and visible.
+/// Rows with no attempt left that nobody holds: the last attempt's process died (its lease
+/// expired) or its result never landed (no lease at all). The outcome is unknown and no
+/// attempt is left, so they are dead and visible. A row whose last attempt is still running
+/// (an unexpired lease) is left alone.
 const SWEEP_EXHAUSTED: &str = r"
 UPDATE notification_outbox
 SET state = 'dead', dead_at = now(), last_error = 'lease_expired',
-    uncertain_attempts = uncertain_attempts + 1, lease_owner = NULL, lease_expires_at = NULL
-WHERE state = 'pending' AND next_attempt_at <= now() AND attempts >= $1
-  AND lease_expires_at < now()";
+    uncertain_attempts = least(uncertain_attempts + 1, 8), lease_owner = NULL, lease_expires_at = NULL
+WHERE state = 'pending' AND attempts >= $1
+  AND (lease_expires_at IS NULL OR lease_expires_at < now())";
 
 fn millis(duration: Duration) -> f64 {
     // Lease and retry delays are at most hours: exact in an f64.
@@ -177,6 +183,7 @@ impl Db {
             .bind(millis(delay))
             .bind(record.outcome.error_code())
             .bind(i16::from(record.outcome.is_uncertain()))
+            .bind(i16::from(record.attempt))
             .execute(&self.pool)
             .await
             .map_err(classify)?;

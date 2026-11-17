@@ -156,6 +156,7 @@ impl Notifier {
         let record = AttemptRecord {
             id: row.id,
             owner,
+            attempt: row.attempt,
             outcome,
             transition,
         };

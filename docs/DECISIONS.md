@@ -380,6 +380,18 @@ starting values; changing one needs a measurement and a new entry.
   which failed before the change. The per-address bucket still charges
   every request: that is the one a flood has to get through first.
 
+- **D-040 — Outbox records are fenced per claim.** A notifier records an
+  attempt's result only if the row still has the lease owner *and* the
+  attempt number it claimed. The owner alone (one id per process) let a
+  late result from an expired claim be applied over the same process's
+  newer claim, which then lost its own result and left the row pending
+  with no attempt left and no lease — neither claimable nor sweepable.
+  The sweep now also marks dead any pending row with no attempt left that
+  nobody holds (no lease, or an expired one), using a partial index.
+  Proven by `outbox_fencing::a_late_result_from_an_expired_claim_cannot_overwrite_the_current_one`
+  and `a_row_with_no_attempt_left_and_no_lease_is_swept_dead`, both
+  failing before the change.
+
 ## Open questions (still open)
 
 These need the maintainer or an outside party; each is in the README's
