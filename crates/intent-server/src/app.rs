@@ -219,6 +219,16 @@ async fn metrics(
             load(&connections.accepted_total),
         ),
         (
+            "connections_refused_per_address_total",
+            "Connections closed at once because their address held its share.",
+            load(&connections.refused_per_address_total),
+        ),
+        (
+            "connections_retired_total",
+            "Connections closed at their request cap or maximum age.",
+            load(&connections.retired_total),
+        ),
+        (
             "connections_write_stalled_total",
             "Connections closed because the client stopped reading.",
             load(&connections.write_stalled_total),

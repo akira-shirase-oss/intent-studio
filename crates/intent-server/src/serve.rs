@@ -113,6 +113,7 @@ pub async fn run(config: Config) -> anyhow::Result<ShutdownOutcome> {
         listener,
         router,
         config.connections,
+        config.trusted_proxies.clone().into(),
         app_connections,
         stop.clone(),
     ));

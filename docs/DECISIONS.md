@@ -494,6 +494,21 @@ starting values; changing one needs a measurement and a new entry.
   `config::tests::a_weak_or_malformed_password_hash_is_refused`, which
   failed before the change (a 8 KiB, 1-iteration hash loaded).
 
+- **D-051 — Bounds per connection and per address.** On top of D-038: a
+  connection serves at most 1,000 requests (the last response carries
+  `Connection: close`) and lives at most 5 minutes (then it finishes its
+  request in flight and closes); one client address — an IPv6 /64 — holds
+  at most 64 connections (never more than the global cap), and further
+  connections from it are closed at accept. A trusted proxy is exempt: it
+  carries many clients, which the per-address request limits tell apart
+  by `X-Forwarded-For`. Reason: one connection answered 500 pipelined
+  requests and stayed 40 s, and 20 keep-alive sockets from one address
+  pinging every 8 s held a cap of 20 for 33 s. Proven by
+  `connections::a_connection_serves_a_bounded_number_of_requests`,
+  `a_busy_connection_is_closed_at_its_maximum_age` and
+  `one_address_cannot_hold_every_connection`, all failing before the
+  change.
+
 ## Open questions (still open)
 
 These need the maintainer or an outside party; each is in the README's

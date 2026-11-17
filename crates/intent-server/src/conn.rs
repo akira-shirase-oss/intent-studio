@@ -9,6 +9,12 @@
 //!   closed after it.
 //! - **Write-stall deadline.** A client that stops reading cannot hold a response (and its
 //!   permit) forever: a write that makes no progress for `write_stall` fails the connection.
+//! - **Bounded per connection and per address.** A connection serves at most
+//!   `max_requests_per_connection` requests (the last response says `Connection: close`) and
+//!   lives at most `max_age`, so a busy socket cannot be held forever; one client address (an
+//!   IPv6 /64) holds at most `max_per_address` connections, so a single client cannot take the
+//!   whole cap. A trusted proxy is exempt: it carries many clients, which the per-address
+//!   request limits then tell apart by `X-Forwarded-For`.
 //! - Graceful shutdown: on stop, accepting ends and every connection finishes its current
 //!   request and closes; the caller bounds the wait.
 //!
@@ -16,20 +22,26 @@
 //! middleware stack, and intake reads a body only after its cheap refusals (rate limits, shed).
 
 use std::{
+    collections::HashMap,
     io,
-    net::SocketAddr,
+    net::{IpAddr, SocketAddr},
     pin::Pin,
     sync::{
         Arc,
-        atomic::{AtomicU64, Ordering},
+        atomic::{AtomicU32, AtomicU64, Ordering},
     },
     task::{Context, Poll},
     time::Duration,
 };
 
-use axum::{Router, extract::ConnectInfo};
+use axum::{
+    Router,
+    extract::ConnectInfo,
+    http::{HeaderValue, header},
+};
 use hyper::server::conn::http1;
 use hyper_util::rt::{TokioIo, TokioTimer};
+use intent_domain::ratelimit::AddressKey;
 use tokio::{
     io::{AsyncRead, AsyncWrite, ReadBuf},
     net::{TcpListener, TcpStream},
@@ -37,7 +49,7 @@ use tokio::{
     time::Sleep,
 };
 use tokio_util::{sync::CancellationToken, task::TaskTracker};
-use tower::ServiceExt as _;
+use tower::ServiceBuilder;
 
 /// Connection limits.
 #[derive(Debug, Clone, Copy)]
@@ -48,6 +60,12 @@ pub struct ConnectionLimits {
     pub header_read_timeout: Duration,
     /// Longest a write may make no progress.
     pub write_stall: Duration,
+    /// Requests one connection serves before it is closed.
+    pub max_requests_per_connection: u32,
+    /// Longest a connection lives; then it finishes its current request and closes.
+    pub max_age: Duration,
+    /// Connections one client address (an IPv6 /64) may hold; trusted proxies are exempt.
+    pub max_per_address: usize,
 }
 
 /// Connection counters, shared with `/metrics`.
@@ -59,6 +77,55 @@ pub struct ConnectionStats {
     pub accepted_total: AtomicU64,
     /// Connections closed because a write stalled.
     pub write_stalled_total: AtomicU64,
+    /// Connections closed at once because their address already held its share.
+    pub refused_per_address_total: AtomicU64,
+    /// Connections closed because they reached their request cap or their age.
+    pub retired_total: AtomicU64,
+}
+
+/// Open connections per client address. Entries exist only while connections are open, so the
+/// table is bounded by the connection cap.
+#[derive(Default)]
+struct PerAddress(std::sync::Mutex<HashMap<AddressKey, usize>>);
+
+/// One counted connection; dropping it gives the slot back.
+struct AddressSlot {
+    table: Arc<PerAddress>,
+    key: AddressKey,
+}
+
+impl PerAddress {
+    fn take(self: &Arc<Self>, key: AddressKey, cap: usize) -> Option<AddressSlot> {
+        let mut table = self
+            .0
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let held = table.entry(key).or_insert(0);
+        if *held >= cap {
+            return None;
+        }
+        *held += 1;
+        Some(AddressSlot {
+            table: self.clone(),
+            key,
+        })
+    }
+}
+
+impl Drop for AddressSlot {
+    fn drop(&mut self) {
+        let mut table = self
+            .table
+            .0
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if let Some(held) = table.get_mut(&self.key) {
+            *held = held.saturating_sub(1);
+            if *held == 0 {
+                table.remove(&self.key);
+            }
+        }
+    }
 }
 
 /// Accepts and serves until `stop` fires; returns the tracker of open connections, which the
@@ -67,10 +134,12 @@ pub async fn serve(
     listener: TcpListener,
     router: Router,
     limits: ConnectionLimits,
+    trusted_proxies: Arc<[IpAddr]>,
     stats: Arc<ConnectionStats>,
     stop: CancellationToken,
 ) -> TaskTracker {
     let permits = Arc::new(Semaphore::new(limits.max_connections));
+    let per_address = Arc::new(PerAddress::default());
     let connections = TaskTracker::new();
     loop {
         let permit = tokio::select! {
@@ -92,17 +161,46 @@ pub async fn serve(
                 }
             },
         };
-        let _ = stream.set_nodelay(true);
         stats.accepted_total.fetch_add(1, Ordering::Relaxed);
+        let slot = if trusted_proxies.contains(&peer.ip()) {
+            None
+        } else if let Some(slot) =
+            per_address.take(AddressKey::of(peer.ip()), limits.max_per_address)
+        {
+            Some(slot)
+        } else {
+            // This address already holds its share: close at once, before any task or buffer.
+            stats
+                .refused_per_address_total
+                .fetch_add(1, Ordering::Relaxed);
+            drop(stream);
+            continue;
+        };
+        let _ = stream.set_nodelay(true);
         stats.open.fetch_add(1, Ordering::Relaxed);
-        let service = router
-            .clone()
-            .map_request(move |mut request: axum::extract::Request<_>| {
-                request
-                    .extensions_mut()
-                    .insert(ConnectInfo::<SocketAddr>(peer));
-                request
-            });
+        let served = Arc::new(AtomicU32::new(0));
+        let cap = limits.max_requests_per_connection;
+        let retired = stats.clone();
+        let service = ServiceBuilder::new()
+            .map_request(
+                move |mut request: axum::extract::Request<hyper::body::Incoming>| {
+                    request
+                        .extensions_mut()
+                        .insert(ConnectInfo::<SocketAddr>(peer));
+                    request
+                },
+            )
+            .map_response(move |mut response: axum::response::Response| {
+                // The request that reaches the cap is answered, then the connection closes.
+                if served.fetch_add(1, Ordering::Relaxed).saturating_add(1) >= cap {
+                    response
+                        .headers_mut()
+                        .insert(header::CONNECTION, HeaderValue::from_static("close"));
+                    retired.retired_total.fetch_add(1, Ordering::Relaxed);
+                }
+                response
+            })
+            .service(router.clone());
         let io = TokioIo::new(WriteDeadline::new(
             stream,
             limits.write_stall,
@@ -113,9 +211,9 @@ pub async fn serve(
             .header_read_timeout(limits.header_read_timeout)
             .keep_alive(true)
             .serve_connection(io, hyper_util::service::TowerToHyperService::new(service));
-        let (stop, stats) = (stop.clone(), stats.clone());
+        let (stop, stats, max_age) = (stop.clone(), stats.clone(), limits.max_age);
         connections.spawn(async move {
-            let _permit = permit;
+            let (_permit, _slot) = (permit, slot);
             let mut connection = std::pin::pin!(connection);
             tokio::select! {
                 result = connection.as_mut() => {
@@ -124,6 +222,12 @@ pub async fn serve(
                     }
                 }
                 () = stop.cancelled() => {
+                    connection.as_mut().graceful_shutdown();
+                    let _ = connection.await;
+                }
+                () = tokio::time::sleep(max_age) => {
+                    // Old enough: finish the request in flight, then close.
+                    stats.retired_total.fetch_add(1, Ordering::Relaxed);
                     connection.as_mut().graceful_shutdown();
                     let _ = connection.await;
                 }

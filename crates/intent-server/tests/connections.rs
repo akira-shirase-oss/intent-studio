@@ -253,3 +253,155 @@ async fn a_client_that_stops_reading_is_cut_off() {
     drop(stalled);
     db.drop_database().await;
 }
+
+/// Reads HTTP/1.1 responses from `stream` until the server closes it (or `limit` passes);
+/// returns how many responses arrived and whether the last one said `connection: close`.
+async fn count_responses(stream: &mut tokio::net::TcpStream, limit: Duration) -> (usize, bool) {
+    let start = Instant::now();
+    let mut seen = Vec::new();
+    let mut buf = vec![0_u8; 16 * 1024];
+    loop {
+        let left = limit.saturating_sub(start.elapsed());
+        match tokio::time::timeout(left, stream.read(&mut buf)).await {
+            Ok(Ok(n)) if n > 0 => seen.extend_from_slice(&buf[..n]),
+            _ => break,
+        }
+    }
+    let text = String::from_utf8_lossy(&seen).to_ascii_lowercase();
+    let responses = text.matches("http/1.1 200").count();
+    let closing = text
+        .rsplit("http/1.1 200")
+        .next()
+        .is_some_and(|last| last.contains("connection: close"));
+    (responses, closing)
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "needs the stack: scripts/stack.sh up (run by scripts/drills.sh)"]
+async fn a_connection_serves_a_bounded_number_of_requests() {
+    let db = TestDb::create(1).await;
+    let fixture = ProviderFixture::start(Mode::Ok).await;
+    let server = server(
+        &db,
+        &fixture,
+        &[("INTENT_MAX_REQUESTS_PER_CONNECTION", "50")],
+    )
+    .await;
+    let mut socket = tokio::net::TcpStream::connect(server.address)
+        .await
+        .unwrap();
+    let mut pipelined = String::new();
+    for _ in 0..100 {
+        pipelined.push_str("GET /healthz HTTP/1.1\r\nhost: x\r\n\r\n");
+    }
+    socket.write_all(pipelined.as_bytes()).await.unwrap();
+    let (responses, closing) = count_responses(&mut socket, Duration::from_secs(5)).await;
+    assert_eq!(
+        responses, 50,
+        "one connection answered {responses} requests"
+    );
+    assert!(closing, "the 50th response must carry connection: close");
+    db.drop_database().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "needs the stack: scripts/stack.sh up (run by scripts/drills.sh)"]
+async fn a_busy_connection_is_closed_at_its_maximum_age() {
+    let db = TestDb::create(1).await;
+    let fixture = ProviderFixture::start(Mode::Ok).await;
+    let server = server(&db, &fixture, &[("INTENT_MAX_CONNECTION_AGE_MS", "2000")]).await;
+    // Keep-alive pings every 300 ms: never idle, so only an age limit can end it.
+    let mut socket = tokio::net::TcpStream::connect(server.address)
+        .await
+        .unwrap();
+    let start = Instant::now();
+    let mut buf = [0_u8; 4096];
+    let closed_after = loop {
+        if socket
+            .write_all(b"GET /healthz HTTP/1.1\r\nhost: x\r\n\r\n")
+            .await
+            .is_err()
+        {
+            break start.elapsed();
+        }
+        if let Ok(Ok(0) | Err(_)) =
+            tokio::time::timeout(Duration::from_secs(2), socket.read(&mut buf)).await
+        {
+            break start.elapsed();
+        }
+        assert!(
+            start.elapsed() < Duration::from_secs(8),
+            "a pinging connection was never closed"
+        );
+        tokio::time::sleep(Duration::from_millis(300)).await;
+    };
+    assert!(
+        closed_after >= Duration::from_millis(1800),
+        "closed too early: {closed_after:?}"
+    );
+    db.drop_database().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "needs the stack: scripts/stack.sh up (run by scripts/drills.sh)"]
+async fn one_address_cannot_hold_every_connection() {
+    let db = TestDb::create(1).await;
+    let fixture = ProviderFixture::start(Mode::Ok).await;
+    let server = server(
+        &db,
+        &fixture,
+        &[
+            ("INTENT_MAX_CONNECTIONS", "20"),
+            ("INTENT_MAX_CONNECTIONS_PER_ADDRESS", "8"),
+        ],
+    )
+    .await;
+    // Twelve sockets from one address: eight are kept, the other four are closed at once.
+    let mut sockets = Vec::new();
+    for _ in 0..12 {
+        sockets.push(
+            tokio::net::TcpStream::connect(server.address)
+                .await
+                .unwrap(),
+        );
+    }
+    let mut closed = 0;
+    for socket in &mut sockets {
+        if time_until_closed(socket, Duration::from_millis(500))
+            .await
+            .is_some()
+        {
+            closed += 1;
+        }
+    }
+    assert_eq!(
+        closed, 4,
+        "{closed} of 12 sockets from one address were closed (cap 8)"
+    );
+    drop(sockets);
+    // A trusted proxy carries many clients: it is not capped per address.
+    let mut env = drill_env(&db, &fixture.url);
+    env.push(("INTENT_MAX_CONNECTIONS".into(), "20".into()));
+    env.push(("INTENT_MAX_CONNECTIONS_PER_ADDRESS".into(), "8".into()));
+    env.push(("INTENT_TRUSTED_PROXIES".into(), "127.0.0.1".into()));
+    let proxied = Server::start(env).await;
+    let mut sockets = Vec::new();
+    for _ in 0..12 {
+        sockets.push(
+            tokio::net::TcpStream::connect(proxied.address)
+                .await
+                .unwrap(),
+        );
+    }
+    let mut closed = 0;
+    for socket in &mut sockets {
+        if time_until_closed(socket, Duration::from_millis(300))
+            .await
+            .is_some()
+        {
+            closed += 1;
+        }
+    }
+    assert_eq!(closed, 0, "the trusted proxy's connections were capped");
+    db.drop_database().await;
+}

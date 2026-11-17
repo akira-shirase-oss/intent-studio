@@ -312,13 +312,11 @@ impl Config {
                 "INTENT_INTAKE_DEADLINE_MS must be smaller than INTENT_REQUEST_TIMEOUT_MS".into(),
             );
         }
+        let max_connections =
+            usize::try_from(env.ranged("INTENT_MAX_CONNECTIONS", 1024, 1..=100_000))
+                .unwrap_or(1024);
         let connections = crate::conn::ConnectionLimits {
-            max_connections: usize::try_from(env.ranged(
-                "INTENT_MAX_CONNECTIONS",
-                1024,
-                1..=100_000,
-            ))
-            .unwrap_or(1024),
+            max_connections,
             header_read_timeout: env.millis(
                 "INTENT_HEADER_READ_TIMEOUT_MS",
                 Duration::from_secs(10),
@@ -329,7 +327,29 @@ impl Config {
                 Duration::from_secs(10),
                 100..=120_000,
             ),
+            max_requests_per_connection: u32::try_from(env.ranged(
+                "INTENT_MAX_REQUESTS_PER_CONNECTION",
+                1_000,
+                1..=1_000_000,
+            ))
+            .unwrap_or(1_000),
+            max_age: env.millis(
+                "INTENT_MAX_CONNECTION_AGE_MS",
+                Duration::from_mins(5),
+                1_000..=86_400_000,
+            ),
+            max_per_address: usize::try_from(env.ranged(
+                "INTENT_MAX_CONNECTIONS_PER_ADDRESS",
+                u64::try_from(max_connections.min(64)).unwrap_or(64),
+                1..=100_000,
+            ))
+            .unwrap_or(64),
         };
+        if connections.max_per_address > connections.max_connections {
+            env.problems.push(
+                "INTENT_MAX_CONNECTIONS_PER_ADDRESS must not exceed INTENT_MAX_CONNECTIONS".into(),
+            );
+        }
         let max_in_flight =
             usize::try_from(env.ranged("INTENT_MAX_IN_FLIGHT", 1024, 1..=100_000)).unwrap_or(1024);
         let mut trusted_proxies = Vec::new();
