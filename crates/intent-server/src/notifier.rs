@@ -79,8 +79,8 @@ impl Notifier {
             let limit = u16::try_from(available)
                 .unwrap_or(u16::MAX)
                 .min(config.batch);
+            // The notifier's own pool, like every other query here (D-034).
             let claimed = match this
-                .app
                 .db
                 .claim_notifications(owner, limit, schedule.max_attempts(), config.lease)
                 .await

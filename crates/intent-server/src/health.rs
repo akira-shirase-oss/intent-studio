@@ -69,7 +69,8 @@ impl Health {
         self.lifecycle.load(Ordering::SeqCst) == READY && self.database_up()
     }
 
-    fn set_database(&self, up: bool) {
+    /// Records the latest database probe (the prober calls this; tests may too).
+    pub fn set_database(&self, up: bool) {
         let was = self.database_up.swap(up, Ordering::SeqCst);
         if was != up {
             if up {
