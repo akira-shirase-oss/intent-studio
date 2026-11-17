@@ -1,27 +1,9 @@
 import { expect, test } from '@playwright/test';
+import { focusIsVisible, tabTo } from './support.ts';
 
 // Screenshots are kept for review only; the assertions are what pass or fail.
 
 const password = process.env['WORKSPACE_PASSWORD'] ?? '';
-
-/** Presses Tab until the focused element matches, as a keyboard user would; fails after 15. */
-async function tabTo(page: import('@playwright/test').Page, matches: (el: Element) => boolean) {
-	for (let i = 0; i < 15; i += 1) {
-		await page.keyboard.press('Tab');
-		if (await page.evaluate(`(${matches.toString()})(document.activeElement)`)) return;
-	}
-	throw new Error('Tab never reached the element');
-}
-
-/** The focused element shows a visible focus indicator (a ring or an outline). */
-async function focusIsVisible(page: import('@playwright/test').Page) {
-	return page.evaluate(() => {
-		const el = document.activeElement;
-		if (!el) return false;
-		const style = getComputedStyle(el);
-		return style.boxShadow !== 'none' || (style.outlineStyle !== 'none' && style.outlineWidth !== '0px');
-	});
-}
 
 test('the operator signs in with the keyboard alone, reads the inbox and signs out', async ({ page }) => {
 	await page.goto('/workspace/');

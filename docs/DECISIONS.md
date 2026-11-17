@@ -748,6 +748,70 @@ starting values; changing one needs a measurement and a new entry.
   up). Cost: a process per file costs a few milliseconds of start-up;
   the pilot's upload rate makes that irrelevant.
 
+- **D-063 — The workspace's studio screens, and how "usable" is proven.**
+  I1 adds Facts, Briefs (list, form, read with revisions and reference
+  copies) and Assets to the inbox, under one shell with Leads, Facts,
+  Briefs and Assets, a client picker, a light/dark/system choice and a
+  skip link. The maintainer's interface standard, as built: only the UI
+  kit's components and tokens; every screen has an empty state that says
+  what to do next, skeletons the height of the rows they stand for, an
+  error with plain words and a way to retry, a success notice, and an
+  honest uncertain state — a write that got no answer, or a 503, says the
+  save could not be confirmed and to check before retrying, never that it
+  failed or succeeded; refusals are in plain words next to their field,
+  summarized with links, with the server's codes behind a "details"
+  toggle; forms open with focus inside them; the operator calls tenants
+  "clients". Proven by `apps/workspace/tests/studio.spec.ts` and
+  `inbox.spec.ts` at 1440 px and 360 px in Chromium: the three studio
+  journeys (keyboard-only where it matters), axe with WCAG 2.0/2.1 A and
+  AA rules showing zero serious or critical violations on all eleven
+  screens in light and in dark, no sideways scrolling, and the CSP
+  checks; review screenshots of each screen at both widths in both
+  schemes are in `docs/screens/` (`scripts/screens.sh`). Long lists use
+  `content-visibility: auto` (the browser skips rows off screen) under the
+  server's 500-row cap, rather than a virtual-list library: for a pilot
+  client's tens of facts it costs nothing and keeps native find, focus
+  and screen-reader order. The bundle budget (`scripts/check-bundle.sh`,
+  run by the gate): all JavaScript 160 KiB gzipped (115 measured), no
+  chunk over 48 KiB (32), CSS 48 KiB (32). The studio API's load scenario
+  is `perf/k6/studio.js` with proposed thresholds (reads p99 < 50 ms, the
+  spec check p99 < 100 ms, no failures); it has not been run, and its
+  budget is set from its first quiet baseline as D-054 did for intake.
+  Uploads have no load scenario: two worker slots, refused with `503`
+  past them, make it a capacity limit by design, not a hot path. Cost:
+  page trees have no screen yet (the spec check is API-only until I2
+  shows candidates), and Chromium is the only engine tested (WebKit
+  arrives with the promotion suite, D-022).
+
+- **D-064 — A tested production path.** The maintainer deploys this
+  himself, so the way in is part of the product: `scripts/package.sh`
+  builds a release package (both binaries, the built workspace, the
+  systemd unit, the env example, the Caddyfile, the operator guide);
+  `deploy/intent-studio.env.example` lists every setting with the
+  decided defaults; `deploy/intent-studio.service` runs as its own user
+  with a state directory and a sandbox (strict read-only system, no new
+  privileges, a system-call filter that leaves the worker its
+  `setrlimit`); `deploy/Caddyfile` terminates HTTPS and passes the
+  client's address; `intent-server check-config` reports every
+  configuration problem without starting; `docs/OPERATOR_GUIDE.md`
+  covers install, first run, upgrade, backup and restore, and
+  troubleshooting. `scripts/test-deploy.sh` (in the gate) installs the
+  package into a scratch prefix, fills the env example, runs
+  `check-config` (and proves it names a missing variable), migrates,
+  serves in the production profile, signs in with the `__Host-` cookie,
+  stores and notifies a lead, uploads through the real worker, backs up
+  database-then-store, restores both into a fresh database and store and
+  serves the same lead and the same asset bytes from them, stops
+  gracefully on `SIGTERM`, and validates the unit (`systemd-analyze
+  verify`, where systemd exists: CI) and the Caddyfile (`caddy
+  validate`, in a pinned container). The workspace's static server now
+  answers every non-file path under `/workspace` with the app shell, so
+  a route that is also a directory of sub-routes (`/workspace/briefs`)
+  loads instead of 404ing. Not tested, and said so in the guide: the
+  worker's own container (D-062), and the notification webhook's TLS —
+  the webhook adapter speaks plain HTTP until the e-mail adapter (I3).
+  Cost: the deploy test adds about a minute to the gate.
+
 ## Open questions (still open)
 
 These need the maintainer or an outside party; each is in the README's

@@ -1,0 +1,35 @@
+# Caddy in front of intent-server: HTTPS (certificates obtained and renewed automatically), the
+# client's address in X-Forwarded-For, and the server on loopback behind it. Replace the host
+# name. Checked on every CI run by scripts/test-deploy.sh (`caddy validate`).
+#
+# intent-server must trust this proxy: INTENT_TRUSTED_PROXIES=127.0.0.1,::1. Caddy replaces
+# any X-Forwarded-For a client sends with the client's own address (it trusts no upstream
+# proxy unless told to), so the server's right-to-left reading finds the real client.
+
+studio.example.com {
+	# Uploads are at most 10 MiB plus the form (D-062); everything else is far smaller.
+	request_body {
+		max_size 11MB
+	}
+
+	reverse_proxy 127.0.0.1:59400 {
+		# Long enough for an upload checked by the worker, or a reference fetched through the
+		# egress guard (each bounded server-side).
+		transport http {
+			read_timeout 40s
+			write_timeout 40s
+		}
+	}
+
+	encode zstd gzip
+
+	# The access log carries method, path, status and timing. Caddy redacts Cookie and
+	# Authorization; lead bodies are never logged by either side (D-029).
+	log {
+		output file /var/log/caddy/intent-studio.log {
+			roll_size 50MiB
+			roll_keep 10
+		}
+		format json
+	}
+}

@@ -4,7 +4,9 @@
 #   toolchain pin · fmt · clippy -D warnings · unit tests · architecture rules and the proof
 #   that they can fail · cargo-deny (when installed; CI runs it in its own job) · the workspace
 #   app: svelte-check, the UI kit's tests, the build · the I0 drills against the real binary and
-#   the local stack (needs Docker) · the workspace in Chromium against the real server
+#   the local stack (needs Docker) · the workspace in Chromium against the real server · the
+#   production path: the release package started from the env example, backup and restore,
+#   the systemd unit and the Caddyfile
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
@@ -53,11 +55,15 @@ npm run check
 npm run test --workspace @intent-studio/ui
 npm run test --workspace @intent-studio/workspace
 npm run build --workspace @intent-studio/workspace
+scripts/check-bundle.sh
 
 step drills
 scripts/drills.sh
 
 step workspace-e2e
 scripts/workspace-e2e.sh
+
+step deploy
+scripts/test-deploy.sh
 
 printf '\ncheck ok\n'

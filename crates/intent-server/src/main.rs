@@ -1,4 +1,5 @@
-//! `intent-server`: serve, migrate, seed demo data, hash the operator password, reconcile a run.
+//! `intent-server`: serve, check the configuration, migrate, seed demo data, hash the operator
+//! password, reconcile a run.
 
 use std::{io::BufRead as _, path::PathBuf, time::Duration};
 
@@ -10,7 +11,17 @@ use intent_domain::limits::NOTIFY_MAX_ATTEMPTS;
 use intent_server::{config::Config, reconcile, serve, telemetry};
 
 #[derive(Parser)]
-#[command(about = "Intent Studio's server", version)]
+#[command(
+    about = "Intent Studio's server",
+    long_about = "Intent Studio's server. Configuration comes from INTENT_* environment variables \
+                  (deploy/intent-studio.env.example lists every one); docs/OPERATOR_GUIDE.md \
+                  covers install, first run, upgrade, backup and troubleshooting.",
+    version,
+    after_help = "Examples:\n  \
+                  intent-server check-config     report every configuration problem, start nothing\n  \
+                  intent-server migrate          apply database migrations\n  \
+                  intent-server                  serve (the same as `intent-server serve`)"
+)]
 struct Cli {
     #[command(subcommand)]
     command: Option<Command>,
@@ -20,6 +31,10 @@ struct Cli {
 enum Command {
     /// Serve HTTP (the default). Configuration comes from `INTENT_*` variables.
     Serve,
+    /// Check the configuration as `serve` would — every variable, the content store (writable),
+    /// the asset worker (present), the workspace directory — then exit: 0 when it would start,
+    /// 1 with every problem listed when it would not.
+    CheckConfig,
     /// Apply database migrations (`INTENT_DATABASE_URL`).
     Migrate,
     /// Create the demo tenant and sites 0..N (ids 00000000-0000-4000-9000-<N in hex>).
@@ -63,6 +78,38 @@ async fn main() -> anyhow::Result<()> {
             let config = Config::from_env().context("loading configuration")?;
             telemetry::init(config.log_format, &config.log_filter).context("starting telemetry")?;
             serve::run(config).await?;
+        }
+        Command::CheckConfig => {
+            let config = match Config::from_env() {
+                Ok(config) => config,
+                Err(error) => {
+                    eprintln!("configuration refused: {} problem(s)", error.problems.len());
+                    for problem in &error.problems {
+                        eprintln!("  - {problem}");
+                    }
+                    std::process::exit(1);
+                }
+            };
+            if let Some(dir) = &config.workspace_dir
+                && !dir.join("200.html").is_file()
+            {
+                eprintln!(
+                    "configuration refused: INTENT_WORKSPACE_DIR {} has no 200.html (build the workspace app)",
+                    dir.display()
+                );
+                std::process::exit(1);
+            }
+            if let Err(error) = intent_server::serve::studio(&config) {
+                eprintln!("configuration refused: {error:#}");
+                std::process::exit(1);
+            }
+            println!(
+                "configuration ok: profile {:?}, listening on {}, content store {}, workspace {}",
+                config.profile,
+                config.bind,
+                if config.studio.store_dir.is_some() { "on" } else { "off (uploads answer 503)" },
+                if config.workspace_dir.is_some() { "served" } else { "not served" },
+            );
         }
         Command::Migrate => {
             database()?

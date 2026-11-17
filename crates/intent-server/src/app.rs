@@ -372,9 +372,14 @@ pub fn router(app: App) -> Router {
         .route("/v1/operator/leads", get(operator::inbox));
     if let Some(dir) = workspace {
         let index = dir.join("200.html");
+        // Files are served as they are; every other path (a route like `/workspace/briefs`,
+        // which the build also has as a directory of sub-routes) gets the app shell, which
+        // routes on the client.
         spine = spine.nest_service(
             "/workspace",
-            ServeDir::new(dir).fallback(ServeFile::new(index)),
+            ServeDir::new(dir)
+                .append_index_html_on_directories(false)
+                .fallback(ServeFile::new(index)),
         );
     }
     let spine = spine.layer(bounded!(request_timeout, MAX_BODY_BYTES));

@@ -2,3 +2,12 @@
  * dependencies, so name the package whose components use its classes. */
 @import '@intent-studio/ui/styles.css';
 @source '../../../packages/ui/src';
+
+/* Long lists: the browser skips laying out and painting rows off screen (D-063), so a client
+ * with hundreds of facts or leads scrolls as lightly as one with ten. */
+@layer components {
+	.list-row {
+		content-visibility: auto;
+		contain-intrinsic-size: auto 7rem;
+	}
+}

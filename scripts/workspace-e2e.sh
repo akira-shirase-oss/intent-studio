@@ -1,7 +1,12 @@
 #!/usr/bin/env bash
-# The workspace app in Chromium (desktop and a 360 px phone) against the real server: builds the
-# app and the release binary, gives them a fresh database on the local stack, stores three leads
-# through the public intake endpoint, and runs apps/workspace/tests with Playwright.
+# The workspace app in Chromium (a 1440 px desktop and a 360 px phone) against the real server:
+# builds the app and the release binaries, gives them a fresh database and content store on the
+# local stack, stores three leads through the public intake endpoint, and runs
+# apps/workspace/tests with Playwright: the operator's journeys, axe (WCAG 2.1 AA, zero serious
+# or critical) on every screen in light and dark, keyboard-only paths.
+#
+# SCREENS=1 also writes each screen at 360 and 1440 px, light and dark, to docs/screens/ for
+# review (scripts/screens.sh).
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
@@ -12,7 +17,7 @@ password="e2e-operator-password-$(date +%s)"
 
 scripts/stack.sh up
 npm run build --workspace @intent-studio/workspace
-cargo build --release --locked -p intent-server
+cargo build --release --locked -p intent-server -p intent-worker
 # The binary just built, wherever CARGO_TARGET_DIR or a cargo config puts it (never a stale
 # ./target: scripts/test-scripts.sh, rule S1).
 bin="$(cargo metadata --format-version 1 --no-deps --locked | jq -r .target_directory)/release"
@@ -23,12 +28,14 @@ INTENT_DATABASE_URL="$url" "$bin"/intent-server seed --sites 2
 hash="$(printf '%s\n' "$password" | "$bin"/intent-server hash-password)"
 
 log="$(mktemp)"
+store="$(mktemp -d)"
 INTENT_DATABASE_URL="$url" INTENT_BIND="127.0.0.1:$port" INTENT_NOTIFY_PROVIDER=recorder INTENT_PROFILE=development \
     INTENT_OPERATOR_PASSWORD_HASH="$hash" INTENT_COOKIE_SECURE=false \
     INTENT_WORKSPACE_DIR=apps/workspace/build INTENT_NOTIFY_POLL_MS=50 \
+    INTENT_STORE_DIR="$store" INTENT_WORKER_BIN="$bin/intent-worker" \
     "$bin"/intent-server serve >"$log" 2>&1 &
 server=$!
-trap 'kill "$server" 2>/dev/null || true; rm -f "$log"' EXIT
+trap 'kill "$server" 2>/dev/null || true; rm -rf "$log" "$store"' EXIT
 for _ in $(seq 1 100); do
     curl -sf "http://127.0.0.1:$port/readyz" >/dev/null && break
     sleep 0.1
@@ -43,8 +50,14 @@ for who in oldest middle newest; do
 done
 sleep 0.5
 
-(cd apps/workspace && WORKSPACE_BASE_URL="http://127.0.0.1:$port" WORKSPACE_PASSWORD="$password" npx playwright test --output test-results)
-if grep -qE 'example\.test|E2E (Oldest|Middle|Newest)|\$argon2|'"$password" "$log"; then
+screens=""
+if [ -n "${SCREENS:-}" ]; then
+    mkdir -p docs/screens
+    screens="$PWD/docs/screens"
+fi
+(cd apps/workspace && WORKSPACE_BASE_URL="http://127.0.0.1:$port" WORKSPACE_PASSWORD="$password" \
+    WORKSPACE_SCREENS_DIR="$screens" npx playwright test --output test-results)
+if grep -qE 'example\.test|E2E (Oldest|Middle|Newest)|Fixed our boiler|Quickbeam|Pat Quickbeam|\$argon2|'"$password" "$log"; then
     echo "workspace-e2e: lead content or a secret reached the server log" >&2
     exit 1
 fi

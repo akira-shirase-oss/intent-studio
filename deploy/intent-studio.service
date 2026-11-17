@@ -1,0 +1,58 @@
+# systemd unit for intent-server. Install: docs/OPERATOR_GUIDE.md, "Install". Checked on every
+# CI run by scripts/test-deploy.sh (`systemd-analyze verify`).
+[Unit]
+Description=Intent Studio (intent-server)
+Documentation=https://github.com/akira-shirase-oss/intent-studio/blob/main/docs/OPERATOR_GUIDE.md
+After=network-online.target postgresql.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=intent
+Group=intent
+EnvironmentFile=/etc/intent-studio/intent-studio.env
+ExecStart=/opt/intent-studio/bin/intent-server serve
+# SIGTERM starts the drain: readiness goes false, the listener stops after the drain delay,
+# in-flight requests get the shutdown grace (2 s + 10 s by default). Leave room beyond it.
+KillSignal=SIGTERM
+TimeoutStopSec=30
+Restart=on-failure
+RestartSec=2
+
+# Connections (1,024) plus pools and the store.
+LimitNOFILE=8192
+
+# /var/lib/intent-studio, created and owned by systemd: the store lives in it.
+StateDirectory=intent-studio
+StateDirectoryMode=0750
+
+# Sandboxing: the server writes only its state directory; it and the worker it starts see no
+# home directories, no other users' temporary files, no kernel tunables.
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+PrivateDevices=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectKernelLogs=true
+ProtectControlGroups=true
+ProtectClock=true
+ProtectHostname=true
+RestrictNamespaces=true
+RestrictRealtime=true
+RestrictSUIDSGID=true
+LockPersonality=true
+MemoryDenyWriteExecute=true
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+CapabilityBoundingSet=
+AmbientCapabilities=
+SystemCallArchitectures=native
+# The worker lowers its own limits with setrlimit (in @system-service's @resources), so only
+# @privileged is taken away.
+SystemCallFilter=@system-service
+SystemCallFilter=~@privileged
+UMask=0077
+
+[Install]
+WantedBy=multi-user.target
