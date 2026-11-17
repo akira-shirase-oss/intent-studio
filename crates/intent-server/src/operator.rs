@@ -17,7 +17,7 @@ use axum::{
 use intent_db::{InboxLead, InboxQuery};
 use intent_domain::{
     ids::{LeadId, SiteId},
-    ratelimit::{AddressKey, RetryAfter, client_address},
+    ratelimit::{AddressKey, RetryAfter},
 };
 use serde::Deserialize;
 use serde_json::json;
@@ -49,8 +49,8 @@ pub async fn sign_in(
     let Some(hash) = app.config.operator_password_hash.clone() else {
         return Err(ApiError::SignInDisabled);
     };
-    let forwarded = headers.get("x-forwarded-for").and_then(|v| v.to_str().ok());
-    let address = client_address(peer.ip(), forwarded, &app.config.trusted_proxies);
+    let address =
+        crate::intake::client_address_of(&headers, peer.ip(), &app.config.trusted_proxies);
     if let Err(RetryAfter(secs)) = app
         .sign_in_limiter
         .check(AddressKey::of(address), app.now_ms())

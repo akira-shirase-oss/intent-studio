@@ -661,3 +661,35 @@ async fn only_storable_leads_from_known_sites_spend_the_site_budget() {
     assert!(text.contains("intent_rate_table_site_keys 1\n"), "{text}");
     db.drop_database().await;
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "needs the stack: scripts/stack.sh up (run by scripts/drills.sh)"]
+async fn every_forwarded_for_line_counts_so_a_client_cannot_pick_its_own_address() {
+    let db = TestDb::create(1).await;
+    let fixture = ProviderFixture::start(Mode::Ok).await;
+    let server = trusted_server(&db, &fixture).await;
+    let client = client();
+    let site = site_for(0, 1);
+    // The client sends a forged first line; the trusted proxy adds the real address as a second
+    // line. Read together, right to left, the client is 10.60.0.1 every time.
+    let mut statuses = Vec::new();
+    for n in 0..7_u64 {
+        let mut headers = reqwest::header::HeaderMap::new();
+        headers.append("x-forwarded-for", format!("10.50.0.{n}").parse().unwrap());
+        headers.append("x-forwarded-for", "10.60.0.1".parse().unwrap());
+        let response = client
+            .post(format!("{}/v1/sites/{site}/leads", server.base))
+            .headers(headers)
+            .json(&LeadSpec::new("xff", n).json())
+            .send()
+            .await
+            .unwrap();
+        statuses.push(response.status().as_u16());
+    }
+    assert_eq!(
+        statuses,
+        vec![201, 201, 201, 201, 201, 429, 429],
+        "the forged first line chose the rate-limit key"
+    );
+    db.drop_database().await;
+}

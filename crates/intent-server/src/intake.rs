@@ -22,6 +22,7 @@ use intent_domain::{
     submission::{fingerprint, keys_for},
 };
 use serde::Serialize;
+use std::net::IpAddr;
 use time::OffsetDateTime;
 use uuid::Uuid;
 
@@ -65,8 +66,7 @@ pub async fn submit(
         return Err(ApiError::Unavailable(None));
     }
 
-    let forwarded = headers.get("x-forwarded-for").and_then(|v| v.to_str().ok());
-    let address = client_address(peer.ip(), forwarded, &app.config.trusted_proxies);
+    let address = client_address_of(&headers, peer.ip(), &app.config.trusted_proxies);
     let now = app.now_ms();
     if let Err(RetryAfter(secs)) = app.address_limiter.check(AddressKey::of(address), now) {
         Metrics::inc(&metrics.intake_rate_limited_address_total);
@@ -171,6 +171,28 @@ fn acknowledge(
     response
 }
 
+/// The client address for rate limiting: every `X-Forwarded-For` line, joined in order and read
+/// from the right under the trusted-proxy rule. A proxy may add its own line instead of
+/// appending to the client's, so reading only the first line would let a client pick its own
+/// address. A line that is not text makes the header untrustworthy: the peer is used.
+pub fn client_address_of(headers: &HeaderMap, peer: IpAddr, trusted: &[IpAddr]) -> IpAddr {
+    let mut joined = String::new();
+    for line in headers.get_all("x-forwarded-for") {
+        let Ok(text) = line.to_str() else {
+            return client_address(peer, Some("unreadable"), trusted);
+        };
+        if !joined.is_empty() {
+            joined.push(',');
+        }
+        joined.push_str(text);
+    }
+    client_address(
+        peer,
+        (!joined.is_empty()).then_some(joined.as_str()),
+        trusted,
+    )
+}
+
 /// Runs a database call under the intake deadline, counting timeouts and outages.
 async fn within_deadline<T>(
     app: &App,
@@ -227,5 +249,37 @@ fn parse(headers: &HeaderMap, body: &[u8]) -> Result<LeadForm, ApiError> {
             serde_urlencoded::from_bytes(body).map_err(|_| ApiError::MalformedBody)
         }
         _ => Err(ApiError::UnsupportedMediaType),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use axum::http::HeaderValue;
+
+    use super::*;
+
+    fn headers(lines: &[&[u8]]) -> HeaderMap {
+        let mut map = HeaderMap::new();
+        for line in lines {
+            map.append("x-forwarded-for", HeaderValue::from_bytes(line).unwrap());
+        }
+        map
+    }
+
+    #[test]
+    fn every_forwarded_for_line_is_read_right_to_left() {
+        let proxy: IpAddr = "127.0.0.1".parse().unwrap();
+        let real: IpAddr = "10.60.0.1".parse().unwrap();
+        let two = headers(&[b"10.50.0.9", b"10.60.0.1"]);
+        assert_eq!(client_address_of(&two, proxy, &[proxy]), real);
+        let one = headers(&[b"10.50.0.9, 10.60.0.1"]);
+        assert_eq!(client_address_of(&one, proxy, &[proxy]), real);
+        assert_eq!(client_address_of(&HeaderMap::new(), proxy, &[proxy]), proxy);
+        // A line that is not text: the header is not believed.
+        let garbage = headers(&[b"10.50.0.9", b"\xff\xfe"]);
+        assert_eq!(client_address_of(&garbage, proxy, &[proxy]), proxy);
+        // An untrusted peer's header is ignored altogether.
+        let stranger: IpAddr = "203.0.113.7".parse().unwrap();
+        assert_eq!(client_address_of(&two, stranger, &[proxy]), stranger);
     }
 }
