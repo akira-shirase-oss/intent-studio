@@ -22,7 +22,7 @@ latency threshold missed on a busy machine is kept as a miss, not rerun until gr
 | 2026-11-17 | burst (250/s, 60 s), rerun | 15,001 | 250.0/s | 5df19c5 | 17.37 | 100% / 0 violations; 14,251 rows delivered = 14,251 provider acceptances, 0 duplicates | 1.2 ms / 15.3 ms | held (p99 < 100 ms, ack rate > 99.9%, 0 dropped) |
 | 2026-11-17 | notify-down (500/s, 100,000) | 99,230 (771 dropped) | 496.1/s | 5df19c5 | 16.07 (37.81 after; up to 78 during the drain) | 99.997% (3 honest 503s, 2 of them stored anyway) / 0 violations; 94,269 rows delivered = 94,269 provider acceptances, 0 duplicates, 0 uncertain | 4.7 ms / 109 ms | **missed** p99 < 100 ms and dropped < 10; ack rate held |
 | 2026-11-17 | realism (50/s, 60 s), after the fix round | 3,001 | 50.0/s | bd8d4e6 | **4.73** (4.85 when k6 ended) | 100% / 0 violations; 2,851 rows delivered = 2,851 provider acceptances, 0 duplicates; logged at debug, 0 lines with lead content | 3.8 ms / 14.7 ms | held (p99 < 100 ms, ack rate > 99.9%, 0 dropped) |
-| 2026-11-17 | burst (250/s, 60 s), after the fix round | 15,000 | 250.0/s | c405dce | **4.51** | 100% / 0 violations; 14,250 rows delivered = 14,250 provider acceptances, 0 duplicates; logged at debug, 0 lines with lead content | 3.0 ms / 89.9 ms | held, narrowly (p99 < 100 ms; debug logging on, unlike the 15.3 ms run) |
+| 2026-11-17 | burst (250/s, 60 s), after the fix round | 15,000 | 250.0/s | c405dce | **4.51** (14.75 when k6 ended: other builds started) | 100% / 0 violations; 14,250 rows delivered = 14,250 provider acceptances, 0 duplicates; logged at debug, 0 lines with lead content | 3.0 ms / 89.9 ms | held, narrowly (p99 < 100 ms; debug logging on, unlike the 15.3 ms run) |
 
 ## Owed
 
