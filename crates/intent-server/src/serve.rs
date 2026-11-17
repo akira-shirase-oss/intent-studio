@@ -77,8 +77,20 @@ pub async fn run(config: Config) -> anyhow::Result<ShutdownOutcome> {
 
     let cancel = CancellationToken::new();
     let tasks = TaskTracker::new();
+    // The prober has a connection of its own: readiness measures the database, not intake's
+    // load. Borrowing from intake's pool, a saturated server would probe "down" and then refuse
+    // everything (D-047).
+    let probe_db = Db::connect_lazy(
+        config.database_url.expose(),
+        intent_db::PoolLimits {
+            max_connections: 1,
+            acquire_timeout: Duration::from_secs(1),
+            statement_timeout: Duration::from_secs(1),
+        },
+    )
+    .map_err(|e| anyhow::anyhow!("INTENT_DATABASE_URL: {}", e.summary()))?;
     tasks.spawn(run_prober(
-        db.clone(),
+        probe_db.clone(),
         health.clone(),
         config.db_probe_interval,
         Duration::from_secs(1),
@@ -132,6 +144,7 @@ pub async fn run(config: Config) -> anyhow::Result<ShutdownOutcome> {
     let _ = tokio::time::timeout(Duration::from_secs(5), async {
         db.close().await;
         notifier_db.close().await;
+        probe_db.close().await;
     })
     .await;
     tracing::info!(?outcome, "shutdown complete");

@@ -457,6 +457,15 @@ starting values; changing one needs a measurement and a new entry.
   `intent-notify` `statuses_map_to_outcomes`, which failed before the
   change (301 and 401 were permanent).
 
+- **D-047 — Readiness probes with a connection of its own.** The
+  database prober (D-035) has a one-connection pool instead of borrowing
+  intake's. Borrowing, a saturated intake pool (a burst, or a lock on
+  `leads`) made the probe time out, readiness go red, and intake refuse
+  everything as "database down" while the database was fine — a busy
+  server turning itself off. Proven by
+  `readiness::readiness_stays_green_while_intakes_pool_is_saturated`
+  (red 18 times in 3 s before the change, 0 after).
+
 ## Open questions (still open)
 
 These need the maintainer or an outside party; each is in the README's
