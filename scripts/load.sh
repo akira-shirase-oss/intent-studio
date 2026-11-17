@@ -29,6 +29,7 @@ case "$scenario" in
     *) echo "usage: scripts/load.sh realism|burst|notify-down|full" >&2; exit 2 ;;
 esac
 : "${SITES:=10000}" "${RETRY_BASE_MS:=1000}" "${DRAIN_TIMEOUT_S:=1800}"
+: "${LOG_LEVEL:=debug,hyper=info,h2=info,sqlx=warn,reqwest=info}"
 k6="${K6:-$(command -v k6 || echo "$HOME/.local/bin/k6")}"
 
 port=59403
@@ -55,7 +56,9 @@ INTENT_DATABASE_URL="$url" "$bin"/intent-server seed --sites "$SITES"
 "$bin"/intent-provider-fixture --bind "127.0.0.1:$fixture_port" --mode unavailable \
     >"$work/fixture.log" 2>&1 &
 fixture=$!
-INTENT_DATABASE_URL="$url" INTENT_BIND="127.0.0.1:$port" INTENT_LOG=warn \
+# Every level is logged, so the leak scan below covers what a debug line would print too
+# (LOG_LEVEL overrides; the level used is recorded in the result).
+INTENT_DATABASE_URL="$url" INTENT_BIND="127.0.0.1:$port" INTENT_LOG="$LOG_LEVEL" \
     INTENT_NOTIFY_PROVIDER=webhook INTENT_NOTIFY_WEBHOOK_URL="http://127.0.0.1:$fixture_port/v1/notify" \
     INTENT_NOTIFY_RETRY_BASE_MS="$RETRY_BASE_MS" INTENT_TRUSTED_PROXIES=127.0.0.1 \
     INTENT_DB_MAX_CONNECTIONS=32 \
@@ -107,7 +110,10 @@ INTENT_DATABASE_URL="$url" "$bin"/intent-server reconcile --prefix "$run" \
     --acks "$work/acks.log" --require-terminal >"$work/verdict.json"
 reconcile_status=$?
 set -e
-leaks="$(grep -cE 'example\.test|Load Lead |\+1 555 01|Quote request ' "$work/server.log" || true)"
+# Lead values the k6 scenario sends, and secret shapes (database URL and password, password
+# hashes, bearer tokens), at every level the server logged.
+leaks="$(grep -cE 'example\.test|Load Lead |\+1 555 01|Quote request |postgres://|intent-dev|\$argon2|[Bb]earer ' "$work/server.log" || true)"
+log_lines="$(wc -l <"$work/server.log" | tr -d ' ')"
 # Cross-check the outbox against the provider: every row marked delivered was accepted by the
 # provider, once per row, and any duplicate acceptance is covered by an uncertain attempt.
 delivered_rows="$(psql -d "$db" -c "SELECT count(*) FROM notification_outbox WHERE state = 'delivered'")"
@@ -135,6 +141,7 @@ jq -n \
     --argjson rate "$RATE" --argjson total "$TOTAL" --argjson p99_ms "$P99_MS" --argjson sites "$SITES" \
     --argjson retry_base_ms "$RETRY_BASE_MS" --argjson drain_seconds "$drain_seconds" \
     --argjson leaks "$leaks" --arg crosscheck "$crosscheck" --arg database "$db" \
+    --arg log_level "$LOG_LEVEL" --argjson log_lines "$log_lines" \
     --argjson delivered_rows "$delivered_rows" --argjson uncertain_attempts "$uncertain_attempts" \
     --argjson fixture_down "$fixture_down" --argjson fixture_after "$fixture_after" \
     --slurpfile k6 "$work/k6-summary.json" --slurpfile verdict "$work/verdict.json" \
@@ -169,6 +176,7 @@ jq -n \
       notifier: { attempts: $attempts, dead: $dead, timeouts: $timeouts, drain_seconds_after_recovery: $drain_seconds },
       intake: { shed: $shed, unavailable: $unavailable, address_table_keys: $address_keys, address_table_evictions: $address_evictions },
       log_lines_with_lead_content: $leaks,
+      log: { level: $log_level, lines_scanned: $log_lines },
       outbox_vs_provider: { delivered_rows: $delivered_rows, uncertain_attempts: $uncertain_attempts, verdict: $crosscheck },
       database: $database
     }' >"$result"

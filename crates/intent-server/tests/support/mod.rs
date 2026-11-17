@@ -13,6 +13,8 @@
 )]
 #![allow(
     clippy::missing_panics_doc,
+    clippy::unwrap_used,
+    clippy::expect_used,
     reason = "test support: panics are test failures"
 )]
 
@@ -691,14 +693,21 @@ pub fn assert_no_leaks(log: &str, needles: &[&str]) {
         log.contains("\"listening\""),
         "the log capture is empty or broken:\n{log}"
     );
-    let planted = format!(
-        "{log}\n{{\"message\":\"planted\",\"email\":\"{}\"}}\n",
-        needles.first().copied().unwrap_or("x@example.test")
-    );
+    // Prove the scanner on every needle, one at a time, in this very log: a needle it could not
+    // see (empty, or spanning lines) would otherwise make a clean verdict meaningless.
     assert!(
-        !scan_for_leaks(&planted, needles).is_empty(),
-        "the scanner missed a planted leak"
+        !needles.is_empty(),
+        "no needles: the check would prove nothing"
     );
+    for needle in needles {
+        let planted = format!("{log}\n{{\"message\":\"planted\",\"value\":\"{needle}\"}}\n");
+        let before = scan_for_leaks(log, &[needle]).len();
+        let after = scan_for_leaks(&planted, &[needle]).len();
+        assert!(
+            !needle.is_empty() && after > before,
+            "the scanner cannot catch the needle {needle:?} in a log line"
+        );
+    }
     let leaks = scan_for_leaks(log, needles);
     assert!(
         leaks.is_empty(),
