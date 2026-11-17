@@ -50,13 +50,15 @@ impl OutboxState {
 pub enum AttemptOutcome {
     /// The provider accepted it (2xx).
     Accepted,
-    /// The provider said no for now (connection refused, 408, 429, 5xx): it did not take the
-    /// notification, so a retry cannot duplicate it.
+    /// The provider did not take the notification, for now: connection refused, 408, 429, 5xx,
+    /// or a configuration error the operator can fix (401, 403, 404, 3xx). A retry cannot
+    /// duplicate it.
     Unavailable,
     /// No answer before the deadline, or the connection broke after the request was sent: the
     /// provider may have taken it. Retried; a duplicate is possible and counted.
     TimedOut,
-    /// The provider refused this notification permanently (other 4xx). Retrying cannot help.
+    /// The provider refused this notification itself (400, 413, 415, 422). Retrying cannot
+    /// help.
     Rejected,
 }
 

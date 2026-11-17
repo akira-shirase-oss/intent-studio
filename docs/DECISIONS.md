@@ -448,6 +448,15 @@ starting values; changing one needs a measurement and a new entry.
   `config::tests::the_recorder_is_refused_outside_development`, which
   failed before the change.
 
+- **D-046 — Which provider answers end a notification.** Only a refusal
+  of the notification itself — 400, 413, 415, 422 — makes the row `dead`
+  at once. 401, 403, 404 and any 3xx (redirects are not followed) mean our
+  configuration is wrong; the operator can fix it, so they are retried on
+  the D-030 schedule like 408, 429 and 5xx, instead of killing every
+  notification on its first attempt. Proven by
+  `intent-notify` `statuses_map_to_outcomes`, which failed before the
+  change (301 and 401 were permanent).
+
 ## Open questions (still open)
 
 These need the maintainer or an outside party; each is in the README's

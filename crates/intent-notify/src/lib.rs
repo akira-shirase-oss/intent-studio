@@ -131,12 +131,17 @@ impl WebhookProvider {
     }
 }
 
-/// How a provider's HTTP status maps to an outcome.
+/// How a provider's HTTP status maps to an outcome (D-046).
+///
+/// Only a refusal of this notification itself (400, 413, 415, 422) is permanent. Everything
+/// else that is not a 2xx is retried on the schedule: the provider being busy or down (408,
+/// 429, 5xx), and our own configuration being wrong (401, 403, 404, a 3xx we do not follow),
+/// which the operator can fix while the row waits.
 pub const fn classify_status(status: u16) -> AttemptOutcome {
     match status {
         200..=299 => AttemptOutcome::Accepted,
-        408 | 429 | 500..=599 => AttemptOutcome::Unavailable,
-        _ => AttemptOutcome::Rejected,
+        400 | 413 | 415 | 422 => AttemptOutcome::Rejected,
+        _ => AttemptOutcome::Unavailable,
     }
 }
 
@@ -210,12 +215,31 @@ mod tests {
     #[test]
     fn statuses_map_to_outcomes() {
         assert_eq!(classify_status(202), AttemptOutcome::Accepted);
-        assert_eq!(classify_status(503), AttemptOutcome::Unavailable);
-        assert_eq!(classify_status(429), AttemptOutcome::Unavailable);
-        assert_eq!(classify_status(408), AttemptOutcome::Unavailable);
-        assert_eq!(classify_status(400), AttemptOutcome::Rejected);
-        assert_eq!(classify_status(404), AttemptOutcome::Rejected);
-        assert_eq!(classify_status(301), AttemptOutcome::Rejected);
+        // The provider did not take it, for now: retried.
+        for status in [408, 429, 500, 503] {
+            assert_eq!(
+                classify_status(status),
+                AttemptOutcome::Unavailable,
+                "{status}"
+            );
+        }
+        // Our configuration is wrong (credentials, permission, endpoint, a redirect we do not
+        // follow): the operator can fix it, so the schedule keeps trying meanwhile.
+        for status in [301, 302, 307, 401, 403, 404, 405] {
+            assert_eq!(
+                classify_status(status),
+                AttemptOutcome::Unavailable,
+                "{status}"
+            );
+        }
+        // This notification itself is refused: retrying cannot help.
+        for status in [400, 413, 415, 422] {
+            assert_eq!(
+                classify_status(status),
+                AttemptOutcome::Rejected,
+                "{status}"
+            );
+        }
     }
 
     #[test]
