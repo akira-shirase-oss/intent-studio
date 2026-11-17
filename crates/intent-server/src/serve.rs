@@ -54,6 +54,38 @@ pub fn os_signal() -> std::io::Result<impl Future<Output = ()> + Send + 'static>
     })
 }
 
+/// Opens the content store (proving it writable), checks the worker exists and builds the egress
+/// guard. A configured store that cannot be used stops startup: a server that would accept an
+/// upload and fail to keep it is worse than one that says so at once.
+pub fn studio(config: &Config) -> anyhow::Result<crate::app::Studio> {
+    let settings = &config.studio;
+    let store = match &settings.store_dir {
+        None => None,
+        Some(dir) => {
+            let store = intent_store::ContentStore::open(dir, intent_store::DEFAULT_MAX_BLOB_BYTES)
+                .map_err(|e| anyhow::anyhow!("INTENT_STORE_DIR {}: {e}", dir.display()))?;
+            anyhow::ensure!(
+                settings.worker_bin.is_file(),
+                "INTENT_WORKER_BIN: no worker at {} (build `intent-worker`, or set the path)",
+                settings.worker_bin.display()
+            );
+            Some(store)
+        }
+    };
+    let worker = intent_render::Driver::new(
+        settings.worker_bin.clone(),
+        settings.worker_timeout,
+        settings.worker_concurrency,
+    );
+    let egress = intent_egress::Guard::system()
+        .map_err(|e| anyhow::anyhow!("building the egress guard's TLS configuration: {e}"))?;
+    Ok(crate::app::Studio {
+        store,
+        worker,
+        egress,
+    })
+}
+
 /// Runs the server until a signal, then drains.
 pub async fn run(config: Config) -> anyhow::Result<ShutdownOutcome> {
     let signal = os_signal().context("installing signal handlers")?;
@@ -70,7 +102,8 @@ pub async fn run(config: Config) -> anyhow::Result<ShutdownOutcome> {
         .await
         .with_context(|| format!("binding {}", config.bind))?;
     let health = Health::default();
-    let app = App::new(config.clone(), db.clone(), health.clone());
+    let studio = studio(&config)?;
+    let app = App::new(config.clone(), db.clone(), health.clone(), studio);
 
     let cancel = CancellationToken::new();
     let tasks = TaskTracker::new();

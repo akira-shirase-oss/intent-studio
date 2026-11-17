@@ -6,6 +6,7 @@
 //! lead sent now would be stored; the operator reads the inbox behind a password session.
 
 pub mod app;
+pub mod assets;
 pub mod config;
 pub mod conn;
 pub mod error;

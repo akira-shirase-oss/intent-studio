@@ -102,6 +102,20 @@ impl NotifyConfig {
     }
 }
 
+/// The studio's untrusted-input settings (I1): the content store and the asset worker.
+#[derive(Debug, Clone)]
+pub struct StudioConfig {
+    /// `INTENT_STORE_DIR`: the content-addressed store's root (D-016). Without it, asset uploads
+    /// and reference snapshots answer `503 store_unavailable`; everything else works.
+    pub store_dir: Option<PathBuf>,
+    /// `INTENT_WORKER_BIN`: the asset worker; by default `intent-worker` beside this binary.
+    pub worker_bin: PathBuf,
+    /// `INTENT_WORKER_TIMEOUT_MS`: one job's wall time.
+    pub worker_timeout: Duration,
+    /// `INTENT_WORKER_CONCURRENCY`: jobs at once.
+    pub worker_concurrency: usize,
+}
+
 /// The whole configuration.
 #[derive(Debug, Clone)]
 pub struct Config {
@@ -143,6 +157,8 @@ pub struct Config {
     pub cookie_secure: bool,
     /// The built workspace app, served at `/workspace`.
     pub workspace_dir: Option<PathBuf>,
+    /// The content store and the asset worker.
+    pub studio: StudioConfig,
     /// Log format.
     pub log_format: LogFormat,
     /// `tracing` filter directives.
@@ -485,6 +501,32 @@ impl Config {
             Duration::from_secs(env.ranged("INTENT_SESSION_IDLE_SECS", 30 * 60, 1..=24 * 3600));
         let cookie_secure = env.parse("INTENT_COOKIE_SECURE", true);
         let workspace_dir = env.raw("INTENT_WORKSPACE_DIR").map(PathBuf::from);
+        let studio = StudioConfig {
+            store_dir: env
+                .raw("INTENT_STORE_DIR")
+                .filter(|v| !v.trim().is_empty())
+                .map(PathBuf::from),
+            worker_bin: env.raw("INTENT_WORKER_BIN").map_or_else(
+                || {
+                    std::env::current_exe()
+                        .ok()
+                        .and_then(|exe| exe.parent().map(|dir| dir.join("intent-worker")))
+                        .unwrap_or_else(|| PathBuf::from("intent-worker"))
+                },
+                PathBuf::from,
+            ),
+            worker_timeout: env.millis(
+                "INTENT_WORKER_TIMEOUT_MS",
+                intent_render::DEFAULT_DEADLINE,
+                500..=60_000,
+            ),
+            worker_concurrency: usize::try_from(env.ranged(
+                "INTENT_WORKER_CONCURRENCY",
+                intent_render::DEFAULT_CONCURRENCY as u64,
+                1..=16,
+            ))
+            .unwrap_or(intent_render::DEFAULT_CONCURRENCY),
+        };
         let log_format = match env.raw("INTENT_LOG_FORMAT").as_deref() {
             None | Some("json") => LogFormat::Json,
             Some("pretty") => LogFormat::Pretty,
@@ -531,6 +573,7 @@ impl Config {
                 session_idle,
                 cookie_secure,
                 workspace_dir,
+                studio,
                 log_format,
                 log_filter,
                 db_probe_interval,

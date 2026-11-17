@@ -31,8 +31,8 @@ use tower_http::{
 use tracing::Level;
 
 use crate::{
-    config::Config, error::ApiError, health::Health, intake, limiter::Limiter, metrics::Metrics,
-    operator, studio,
+    assets, config::Config, error::ApiError, health::Health, intake, limiter::Limiter,
+    metrics::Metrics, operator, studio,
 };
 
 /// The request-id header.
@@ -66,7 +66,19 @@ pub struct Inner {
     pub sites: crate::sites::SiteDirectory,
     /// Connection counters, kept by the accept loop.
     pub connections: Arc<crate::conn::ConnectionStats>,
+    /// The content store, the asset worker and the egress guard (I1).
+    pub studio: Studio,
     started: Instant,
+}
+
+/// What the studio's untrusted-input routes need. Built at startup by [`crate::serve`].
+pub struct Studio {
+    /// The content-addressed store; `None` when `INTENT_STORE_DIR` is unset.
+    pub store: Option<intent_store::ContentStore>,
+    /// Runs the asset worker, one process per file.
+    pub worker: intent_render::Driver,
+    /// The only way to fetch a client-named URL (D-012).
+    pub egress: intent_egress::Guard<intent_egress::SystemResolver, intent_egress::TcpConnector>,
 }
 
 impl std::ops::Deref for App {
@@ -79,7 +91,7 @@ impl std::ops::Deref for App {
 
 impl App {
     /// Builds the state.
-    pub fn new(config: Config, db: Db, health: Health) -> Self {
+    pub fn new(config: Config, db: Db, health: Health, studio: Studio) -> Self {
         Self(Arc::new(Inner {
             gate: Arc::new(Semaphore::new(config.max_in_flight)),
             address_limiter: Limiter::new(config.address_quota, config.rate_table_entries),
@@ -89,6 +101,7 @@ impl App {
             connections: Arc::new(crate::conn::ConnectionStats::default()),
             sites: crate::sites::SiteDirectory::new(100_000, std::time::Duration::from_secs(60)),
             metrics: Metrics::default(),
+            studio,
             started: Instant::now(),
             config,
             db,
@@ -281,34 +294,9 @@ macro_rules! bounded {
     };
 }
 
-/// The router with its middleware, ready to serve.
-pub fn router(app: App) -> Router {
-    let request_timeout = app.config.request_timeout;
-    let workspace = app.config.workspace_dir.clone();
-    // I0: intake, health, metrics, the operator session and inbox, the workspace app. Bodies
-    // are at most 16 KiB (D-019).
-    let mut spine = Router::new()
-        .route("/healthz", get(healthz))
-        .route("/readyz", get(readyz))
-        .route("/metrics", get(metrics))
-        .route("/v1/sites/{site}/leads", post(intake::submit))
-        .route(
-            "/v1/operator/session",
-            post(operator::sign_in)
-                .get(operator::session)
-                .delete(operator::sign_out),
-        )
-        .route("/v1/operator/leads", get(operator::inbox));
-    if let Some(dir) = workspace {
-        let index = dir.join("200.html");
-        spine = spine.nest_service(
-            "/workspace",
-            ServeDir::new(dir).fallback(ServeFile::new(index)),
-        );
-    }
-    let spine = spine.layer(bounded!(request_timeout, MAX_BODY_BYTES));
-    // I1: the studio's records. Larger bodies (a brief, a page tree); each handler caps its own.
-    let studio = Router::new()
+/// I1: the studio's records. Larger bodies (a brief, a page tree); each handler caps its own.
+fn studio_routes(app: &App) -> Router<App> {
+    Router::new()
         .route(
             "/v1/operator/tenants",
             get(studio::tenants).post(studio::create_tenant),
@@ -337,7 +325,61 @@ pub fn router(app: App) -> Router {
             "/v1/operator/tenants/{tenant}/briefs/{brief}/spec-check",
             post(studio::spec_check),
         )
-        .layer(bounded!(request_timeout, studio::SPEC_BODY_BYTES));
+        .layer(bounded!(
+            app.config.request_timeout,
+            studio::SPEC_BODY_BYTES
+        ))
+}
+
+/// I1: untrusted bytes in — uploads through the asset worker, reference fetches through the
+/// egress guard. Longer: an upload, a worker job and a fetch each take seconds.
+fn untrusted_routes(app: &App) -> Router<App> {
+    let timeout = (app.config.studio.worker_timeout + Duration::from_secs(20))
+        .max(intent_egress::DEFAULT_DEADLINE + Duration::from_secs(10));
+    Router::new()
+        .route(
+            "/v1/operator/tenants/{tenant}/assets",
+            get(assets::list).post(assets::upload),
+        )
+        .route(
+            "/v1/operator/tenants/{tenant}/assets/{asset}/content",
+            get(assets::content),
+        )
+        .route(
+            "/v1/operator/tenants/{tenant}/briefs/{brief}/snapshots",
+            get(assets::snapshots).post(assets::fetch_snapshot),
+        )
+        .layer(bounded!(timeout, assets::UPLOAD_BODY_BYTES))
+}
+
+/// The router with its middleware, ready to serve.
+pub fn router(app: App) -> Router {
+    let request_timeout = app.config.request_timeout;
+    let workspace = app.config.workspace_dir.clone();
+    // I0: intake, health, metrics, the operator session and inbox, the workspace app. Bodies
+    // are at most 16 KiB (D-019).
+    let mut spine = Router::new()
+        .route("/healthz", get(healthz))
+        .route("/readyz", get(readyz))
+        .route("/metrics", get(metrics))
+        .route("/v1/sites/{site}/leads", post(intake::submit))
+        .route(
+            "/v1/operator/session",
+            post(operator::sign_in)
+                .get(operator::session)
+                .delete(operator::sign_out),
+        )
+        .route("/v1/operator/leads", get(operator::inbox));
+    if let Some(dir) = workspace {
+        let index = dir.join("200.html");
+        spine = spine.nest_service(
+            "/workspace",
+            ServeDir::new(dir).fallback(ServeFile::new(index)),
+        );
+    }
+    let spine = spine.layer(bounded!(request_timeout, MAX_BODY_BYTES));
+    let studio = studio_routes(&app);
+    let untrusted = untrusted_routes(&app);
     let stack = ServiceBuilder::new()
         .layer(axum_mw::map_request(sanitize_request_id))
         .layer(SetRequestIdLayer::new(REQUEST_ID, MakeRequestUuidV7))
@@ -348,8 +390,9 @@ pub fn router(app: App) -> Router {
         ))
         // Nothing here may be framed, load plugins or rebase relative URLs; the workspace's
         // pages add their own script policy (hashes) in a meta tag. No referrer leaves the
-        // workspace (its URLs can name sites and leads).
-        .layer(SetResponseHeaderLayer::overriding(
+        // workspace (its URLs can name sites and leads). A handler may send a stricter policy
+        // of its own (asset content adds `sandbox`), which this then leaves in place.
+        .layer(SetResponseHeaderLayer::if_not_present(
             header::CONTENT_SECURITY_POLICY,
             HeaderValue::from_static(
                 "frame-ancestors 'none'; base-uri 'none'; object-src 'none'; form-action 'self'",
@@ -377,6 +420,7 @@ pub fn router(app: App) -> Router {
         .layer(CatchPanicLayer::custom(panic_response));
     spine
         .merge(studio)
+        .merge(untrusted)
         .fallback(fallback)
         .layer(stack)
         .with_state(app)

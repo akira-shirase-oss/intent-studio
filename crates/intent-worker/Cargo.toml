@@ -14,10 +14,9 @@ intent-render.workspace = true
 rlimit.workspace = true
 roxmltree.workspace = true
 serde_json.workspace = true
-ttf-parser.workspace = true
+skrifa.workspace = true
 
 [dev-dependencies]
-rlimit.workspace = true
 tokio.workspace = true
 
 [lints]

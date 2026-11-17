@@ -9,6 +9,8 @@ set -euo pipefail
 cd "$(dirname "$0")/.."
 
 scripts/stack.sh up
+# The asset worker is a binary of its own crate; the asset drill runs the real one.
+cargo build --release --locked -p intent-worker
 cargo test --release --locked -p intent-server \
-    --no-fail-fast --test harness --test intake --test operator --test studio --test connections --test outbox_fencing --test notifier_pool --test readiness --test drill_notify_down --test drill_kill --test drill_db_down \
+    --no-fail-fast --test harness --test intake --test operator --test studio --test assets --test connections --test outbox_fencing --test notifier_pool --test readiness --test drill_notify_down --test drill_kill --test drill_db_down \
     -- --ignored

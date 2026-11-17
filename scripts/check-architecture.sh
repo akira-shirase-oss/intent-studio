@@ -69,7 +69,7 @@ has_dep() { # crate_dir, extended regex of names
 io_crates='tokio|tokio-util|tokio-postgres|async-std|smol|mio|socket2|sqlx|sqlx-.*|postgres|diesel|redis|reqwest|hyper|hyper-util|axum|tower|tower-http|ureq|isahc|surf|attohttpc|curl|tempfile|notify|fs-err|walkdir'
 provider_clients='async-openai|openai|openai-api-rs|anthropic|anthropic-sdk|misanthropy|genai|rig-core|ollama-rs|google-generativeai|aws-sdk-bedrockruntime|mistralai-client|cohere-rust|llm'
 http_clients='reqwest|ureq|isahc|surf|attohttpc|curl|awc'
-decoders='image|png|jpeg-decoder|zune-jpeg|gif|image-webp|webp|resvg|usvg|tiny-skia|roxmltree|xmlparser|quick-xml|xml-rs|xml5ever|ttf-parser|owned_ttf_parser|fontdb|allsorts|skrifa|read-fonts|lol_html|html5ever|scraper|kuchikiki|tl'
+decoders='image|png|jpeg-decoder|zune-jpeg|gif|image-webp|webp|resvg|usvg|tiny-skia|roxmltree|xmlparser|quick-xml|xml-rs|xml5ever|ttf-parser|owned_ttf_parser|fontdb|allsorts|skrifa|read-fonts|font-types|lol_html|html5ever|scraper|kuchikiki|tl'
 db_clients='pg|postgres|@neondatabase/serverless|@vercel/postgres|@prisma/client|prisma|drizzle-orm|kysely|knex|sequelize|typeorm|mysql2|better-sqlite3|sqlite3|@supabase/supabase-js|@libsql/client'
 
 # A1: the domain is pure.
@@ -134,6 +134,10 @@ if [ -f Cargo.lock ] && [ -d crates/intent-server ] && command -v cargo >/dev/nu
     bad="$(echo "$resolved" | grep -Ex "$decoders|intent-worker" || true)"
     [ -z "$bad" ] || fail "A6 intent-server pulls a decoder in transitively: $(echo "$bad" | tr '\n' ' ')"
 fi
+
+# A3 in source: hyper's client side (a raw HTTP client) only in intent-egress.
+raw_clients="$(grep -rnE 'hyper::client|client::conn::http[12]' crates/*/src 2>/dev/null | grep -v '^crates/intent-egress/' || true)"
+[ -z "$raw_clients" ] || fail "A3 hyper's HTTP client used outside intent-egress:"$'\n'"$raw_clients"
 
 # A4: review never reaches publish.
 if [ -d crates/intent-review ] && has_dep crates/intent-review 'intent-publish'; then

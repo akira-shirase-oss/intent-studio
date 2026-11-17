@@ -10,7 +10,7 @@ publish.workspace = true
 [dependencies]
 anyhow.workspace = true
 argon2.workspace = true
-axum.workspace = true
+axum = { workspace = true, features = ["multipart"] }
 clap.workspace = true
 fastrand.workspace = true
 hashlink.workspace = true
@@ -20,7 +20,10 @@ hyper.workspace = true
 hyper-util.workspace = true
 intent-db.workspace = true
 intent-domain.workspace = true
+intent-egress.workspace = true
 intent-notify.workspace = true
+intent-render.workspace = true
+intent-store.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 serde_path_to_error.workspace = true
@@ -37,6 +40,8 @@ tracing-subscriber.workspace = true
 uuid = { workspace = true, features = ["v4", "v7"] }
 
 [dev-dependencies]
+# Test fixtures only (an image to upload); the server itself never links a decoder (A6).
+image.workspace = true
 intent-provider-fixture.workspace = true
 reqwest.workspace = true
 sqlx.workspace = true

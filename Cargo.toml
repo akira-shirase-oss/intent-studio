@@ -47,6 +47,8 @@ roxmltree = "0.21.2"
 # C toolchain beyond ring's) and the Mozilla root set compiled in.
 rustls = { version = "0.23.46", default-features = false, features = ["ring", "std", "tls12"] }
 serde = { version = "1.0.229", features = ["derive"] }
+# Font parsing for the asset worker (ttf-parser is unmaintained: RUSTSEC-2026-0192).
+skrifa = "0.50.0"
 serde_json = "1.0.154"
 # The path of a JSON shape error (`pages[0].sections[2]`), without echoing the serde message.
 serde_path_to_error = "0.1.20"
@@ -61,7 +63,6 @@ tokio-util = { version = "0.7.20", features = ["rt"] }
 tower = { version = "0.5.3", features = ["util"] }
 tower-http = { version = "0.7.1", features = ["request-id", "trace", "timeout", "limit", "catch-panic", "fs"] }
 tracing = "0.1.44"
-ttf-parser = { version = "0.25.1", default-features = false, features = ["std", "opentype-layout", "apple-layout", "variable-fonts", "glyph-names"] }
 tracing-subscriber = { version = "0.3.23", features = ["env-filter", "json"] }
 url = "2.5.8"
 uuid = { version = "1.29", default-features = false, features = ["std", "serde"] }

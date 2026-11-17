@@ -277,9 +277,8 @@ async fn good_images_and_fonts_pass_and_lose_their_metadata() {
     );
 }
 
-#[tokio::test]
-async fn the_worker_runs_confined() {
-    // An unknown kind is refused by the worker itself before it reads anything.
+#[test]
+fn an_unknown_kind_is_refused_before_anything_is_read() {
     let status = std::process::Command::new(env!("CARGO_BIN_EXE_intent-worker"))
         .arg("gif")
         .env_clear()
@@ -287,11 +286,56 @@ async fn the_worker_runs_confined() {
         .status()
         .unwrap();
     assert_eq!(status.code(), Some(2));
-    // It cannot write files: RLIMIT_FSIZE is 0. Proven by the limit itself, read back through
-    // the same crate the worker uses, in a child that applies the worker's limits.
-    let (soft, hard) = rlimit::getrlimit(rlimit::Resource::FSIZE).unwrap();
+}
+
+/// The worker's limits, read from the kernel while it waits for its input (Linux, where
+/// `/proc` shows them and the address-space limit is enforced; CI runs on Linux).
+#[cfg(target_os = "linux")]
+#[test]
+fn the_worker_confines_itself_before_reading_input() {
+    let mut child = std::process::Command::new(env!("CARGO_BIN_EXE_intent-worker"))
+        .arg("svg")
+        .env_clear()
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::null())
+        .spawn()
+        .unwrap();
+    std::thread::sleep(Duration::from_millis(300));
+    let limits = std::fs::read_to_string(format!("/proc/{}/limits", child.id())).unwrap();
+    let _ = child.kill();
+    let _ = child.wait();
+    let row = |name: &str| {
+        limits
+            .lines()
+            .find(|l| l.starts_with(name))
+            .unwrap_or_else(|| panic!("no {name} in\n{limits}"))
+            .split_whitespace()
+            .collect::<Vec<_>>()
+            .join(" ")
+    };
     assert!(
-        soft > 0 || hard > 0,
-        "the test process itself is unconfined"
+        row("Max cpu time").contains("10 10 seconds"),
+        "{}",
+        row("Max cpu time")
+    );
+    assert!(
+        row("Max file size").contains("0 0 bytes"),
+        "{}",
+        row("Max file size")
+    );
+    assert!(
+        row("Max core file size").contains("0 0 bytes"),
+        "{}",
+        row("Max core file size")
+    );
+    assert!(
+        row("Max open files").contains("16 16 files"),
+        "{}",
+        row("Max open files")
+    );
+    assert!(
+        row("Max address space").contains("1073741824 1073741824 bytes"),
+        "{}",
+        row("Max address space")
     );
 }

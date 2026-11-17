@@ -1,20 +1,26 @@
-//! TrueType and OpenType fonts: the tables parsed and every glyph walked (D-062). Fonts are not
-//! re-encoded; a font that parses whole is stored as uploaded. WOFF, WOFF2 and collections are
-//! refused for now: serving fonts in WOFF2 arrives with the bundle build (I2).
+//! TrueType and OpenType fonts: the tables parsed and every glyph drawn (D-062), with skrifa
+//! (Google Fonts' maintained parser; ttf-parser is unmaintained, RUSTSEC-2026-0192). Fonts are
+//! not re-encoded; a font that parses whole is stored as uploaded. WOFF, WOFF2 and collections
+//! are refused for now: serving fonts in WOFF2 arrives with the bundle build (I2).
 
 use intent_render::WorkerRefusal;
-use ttf_parser::{Face, GlyphId, OutlineBuilder};
+use skrifa::{
+    FontRef, GlyphId, MetadataProvider as _,
+    instance::{LocationRef, Size},
+    metrics::Metrics,
+    outline::{DrawSettings, OutlinePen},
+};
 
 /// Largest font accepted (5 MiB).
 pub const MAX_FONT_BYTES: usize = 5 * 1024 * 1024;
 
 struct Discard;
 
-impl OutlineBuilder for Discard {
+impl OutlinePen for Discard {
     fn move_to(&mut self, _x: f32, _y: f32) {}
     fn line_to(&mut self, _x: f32, _y: f32) {}
-    fn quad_to(&mut self, _x1: f32, _y1: f32, _x: f32, _y: f32) {}
-    fn curve_to(&mut self, _x1: f32, _y1: f32, _x2: f32, _y2: f32, _x: f32, _y: f32) {}
+    fn quad_to(&mut self, _cx0: f32, _cy0: f32, _x: f32, _y: f32) {}
+    fn curve_to(&mut self, _cx0: f32, _cy0: f32, _cx1: f32, _cy1: f32, _x: f32, _y: f32) {}
     fn close(&mut self) {}
 }
 
@@ -29,14 +35,25 @@ pub fn check(input: &[u8]) -> Result<&'static str, WorkerRefusal> {
         Some(b"wOFF" | b"wOF2" | b"ttcf") => return Err(WorkerRefusal::UnsupportedType),
         _ => return Err(WorkerRefusal::TypeMismatch),
     };
-    let face = Face::parse(input, 0).map_err(|_| WorkerRefusal::Malformed)?;
-    if face.number_of_glyphs() == 0 || face.tables().cmap.is_none() {
+    let font = FontRef::new(input).map_err(|_| WorkerRefusal::Malformed)?;
+    let metrics = Metrics::new(&font, Size::unscaled(), LocationRef::default());
+    // A font needs a sane em, at least one glyph and a character map to be usable at all.
+    if !(16..=16_384).contains(&metrics.units_per_em)
+        || metrics.glyph_count == 0
+        || !font.charmap().has_map()
+    {
         return Err(WorkerRefusal::Malformed);
     }
-    // Walk every glyph's outline: a table that parses but whose glyphs do not is malformed in
-    // the place a renderer would find out.
-    for id in 0..face.number_of_glyphs() {
-        let _ = face.outline_glyph(GlyphId(id), &mut Discard);
+    // Draw every glyph: a table that parses but whose glyphs do not is malformed in the place a
+    // renderer would find out. A glyph with no outline (a space) is fine.
+    let outlines = font.outline_glyphs();
+    let settings = || DrawSettings::unhinted(Size::unscaled(), LocationRef::default());
+    for id in 0..metrics.glyph_count {
+        if let Some(glyph) = outlines.get(GlyphId::new(id)) {
+            glyph
+                .draw(settings(), &mut Discard)
+                .map_err(|_| WorkerRefusal::Malformed)?;
+        }
     }
     Ok(media_type)
 }

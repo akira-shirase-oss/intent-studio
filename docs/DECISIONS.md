@@ -672,6 +672,82 @@ starting values; changing one needs a measurement and a new entry.
   re-word; the lint is versioned data, and changing it changes the
   version.
 
+- **D-060 — The egress guard, built on its own HTTP/1.1 client.**
+  `intent-egress` speaks HTTP/1.1 through hyper's client connection over
+  a stream its `Connect` port opens, after its `Resolve` port answered
+  and every address in the answer passed the policy. A general HTTP
+  client (reqwest) resolves and connects internally, so the check and
+  the connection could not be shown to use the same answer, and a test
+  could not reach a fixture without allowing loopback; with the two
+  ports, production uses the system resolver and TCP, and tests use a
+  fixture resolver and an in-memory pipe to an in-process server — the
+  policy never changes (D-012). The policy is an allowlist for IPv6
+  (`2000::/3` minus its special blocks) and a denylist of every IPv4
+  special-purpose block (documentation and benchmarking ranges included,
+  beyond D-012's list); IPv4 inside IPv6 (mapped, NAT64, 6to4) is judged
+  as IPv4. A name whose answer holds one forbidden address among public
+  ones is refused outright. Only ports 80 and 443; `Accept-Encoding:
+  identity` (no decompression bomb); `https` over rustls with the ring
+  provider and the Mozilla roots compiled in (`webpki-roots`), never
+  downgraded to `http` by a redirect; at most 3 redirects, each checked
+  from the start; one 10 s deadline for the whole fetch; 5 MiB pages,
+  20 MiB assets, refused on `Content-Length` before reading. Every
+  refusal has a stable code and is recorded on the snapshot row. Proven
+  by `intent-egress` `policy::tests` (every block at its edges, public
+  neighbours pass) and `tests/guard.rs` (each refused before any
+  connection; rebinding; redirects to private targets; bounds), and by
+  the `assets` drill (a loopback listener sees zero connections). Cost:
+  HTTP/2-only sites and references on other ports cannot be fetched;
+  they can be saved and uploaded as files.
+
+- **D-061 — The content-addressed store's layout and guarantees.**
+  `intent-store` keeps blobs at `<root>/sha256/ab/cd/<hex>`, written to
+  `<root>/tmp/` under a fresh name, flushed, renamed into place and the
+  directory flushed, so a crash leaves the whole blob or nothing under
+  its name; storing the same bytes again is a no-op; every read re-hashes
+  and a mismatch is `Corrupt`, never served; at most 32 MiB a blob; every
+  operation runs off the async workers under a 10 s deadline. The root is
+  `INTENT_STORE_DIR`; a configured store that cannot be written stops
+  startup. Without one, uploads and snapshots answer `503
+  store_unavailable` and everything else works. Blobs whose database row
+  never committed (a crash between storing and recording) are orphans:
+  harmless, unreferenced, and left for a later sweep. Cost: one disk until
+  backups are copied off the host (D-016); the operator guide's backup
+  covers the database and this directory together.
+
+- **D-062 — The asset worker: one process per file, now; the container
+  at deployment.** D-011 puts untrusted decoding in a rootless container.
+  I1 builds the part that does not depend on a container runtime and is
+  testable everywhere: `intent-worker` is a separate binary — the only
+  crate allowed a decoder (architecture rule A6) — started per file by
+  `intent-render`'s driver with an empty environment (no database URL or
+  key can reach it), stdin in, one framed answer out, stderr discarded,
+  a 10 s wall-time kill, a cap on its output, and two jobs at once. Before
+  reading a byte it limits itself: 10 s of CPU, no file writes, no core
+  dumps, 16 descriptors and, on Linux, 1 GiB of address space; a limit it
+  cannot set stops it. A crash, an abort, a signal or garbage on stdout is
+  `worker_crashed` for that one upload; the server keeps serving. Formats:
+  SVG is rebuilt from an element and attribute allowlist (no DTD, a node
+  limit, only same-document references, every value escaped) — chosen
+  over rasterizing because a logo must stay a vector and the allowlist
+  writes nothing it does not name; PNG and JPEG are decoded under 8,192
+  pixels a side and 256 MiB and re-encoded, which drops all metadata;
+  TrueType and OpenType fonts are parsed and every glyph drawn with
+  skrifa (ttf-parser is unmaintained, RUSTSEC-2026-0192) and stored
+  unchanged. WebP, GIF, WOFF and WOFF2 are refused for now
+  (`unsupported_type`). Uploads are `multipart/form-data` with a custom
+  header a cross-site form cannot send. Still owed for D-011, at
+  deployment: the container itself — read-only root, no network, no
+  credentials mounted — around the same binary; the operator guide
+  describes it. Proven by `intent-worker` `tests/assets.rs` (the hostile
+  SVG keeps 0 of its 17 dangerous parts; DTD, mismatched and truncated
+  files refused; metadata gone; limits read back from `/proc` on Linux),
+  `intent-render`'s driver tests (signal, non-zero exit, hang, flood,
+  absent binary, empty environment) and the `assets` drill (a worker
+  that dies by `SIGSEGV` fails only its upload; readiness and intake stay
+  up). Cost: a process per file costs a few milliseconds of start-up;
+  the pilot's upload rate makes that irrelevant.
+
 ## Open questions (still open)
 
 These need the maintainer or an outside party; each is in the README's
