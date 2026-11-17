@@ -215,18 +215,21 @@ async fn within_deadline<T>(
 
 /// Reads a request body of at most [`MAX_BODY_BYTES`]; the request timeout bounds how long.
 pub async fn read_body(body: Body) -> Result<Bytes, ApiError> {
-    axum::body::to_bytes(body, MAX_BODY_BYTES)
-        .await
-        .map_err(|error| {
-            let mut cause: Option<&(dyn std::error::Error + 'static)> = Some(&error);
-            while let Some(current) = cause {
-                if current.is::<http_body_util::LengthLimitError>() {
-                    return ApiError::PayloadTooLarge;
-                }
-                cause = current.source();
+    read_body_capped(body, MAX_BODY_BYTES).await
+}
+
+/// Reads a request body of at most `cap` bytes; the request timeout bounds how long.
+pub async fn read_body_capped(body: Body, cap: usize) -> Result<Bytes, ApiError> {
+    axum::body::to_bytes(body, cap).await.map_err(|error| {
+        let mut cause: Option<&(dyn std::error::Error + 'static)> = Some(&error);
+        while let Some(current) = cause {
+            if current.is::<http_body_util::LengthLimitError>() {
+                return ApiError::PayloadTooLarge;
             }
-            ApiError::MalformedBody
-        })
+            cause = current.source();
+        }
+        ApiError::MalformedBody
+    })
 }
 
 /// JSON or a no-script form post. Parse errors are never echoed: serde messages can quote input.

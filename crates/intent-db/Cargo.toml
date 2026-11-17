@@ -1,6 +1,6 @@
 [package]
 name = "intent-db"
-description = "Intent Studio's PostgreSQL layer: migrations, the lead + outbox transaction, the leased outbox, the inbox and operator sessions."
+description = "Intent Studio's PostgreSQL layer: migrations, the lead + outbox transaction, the leased outbox, the inbox, operator sessions, and the studio's tenants, facts, briefs, assets and snapshots."
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -9,6 +9,7 @@ publish.workspace = true
 
 [dependencies]
 intent-domain.workspace = true
+serde_json.workspace = true
 sqlx.workspace = true
 thiserror.workspace = true
 time.workspace = true

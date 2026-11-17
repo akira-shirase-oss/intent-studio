@@ -36,6 +36,27 @@ pub enum RefusalCode {
     MethodNotAllowed,
     /// A defect. The cause is logged; the client sees only this code.
     Internal,
+    /// A tenant's fields broke a rule; the response lists each problem by path.
+    TenantInvalid,
+    /// A fact's fields broke a rule.
+    FactInvalid,
+    /// An approval broke a rule.
+    ApprovalInvalid,
+    /// The fact was withdrawn and can no longer be approved.
+    FactWithdrawn,
+    /// A brief broke a rule (shape, bounds, or claims that are not approved facts).
+    BriefInvalid,
+    /// Another revision of the brief was saved since the one this change was made from.
+    RevisionConflict,
+    /// A page tree broke a rule; the response lists each problem by path.
+    SpecInvalid,
+    /// The asset worker refused the file (not the type it claims, malformed, too large, or
+    /// the worker failed on it). Nothing was stored.
+    AssetRefused,
+    /// The egress guard refused the address or the fetch failed; the response names why.
+    FetchRefused,
+    /// The content store is not configured or cannot be written.
+    StoreUnavailable,
 }
 
 impl RefusalCode {
@@ -57,6 +78,16 @@ impl RefusalCode {
             Self::NotFound => "not_found",
             Self::MethodNotAllowed => "method_not_allowed",
             Self::Internal => "internal",
+            Self::TenantInvalid => "tenant_invalid",
+            Self::FactInvalid => "fact_invalid",
+            Self::ApprovalInvalid => "approval_invalid",
+            Self::FactWithdrawn => "fact_withdrawn",
+            Self::BriefInvalid => "brief_invalid",
+            Self::RevisionConflict => "revision_conflict",
+            Self::SpecInvalid => "spec_invalid",
+            Self::AssetRefused => "asset_refused",
+            Self::FetchRefused => "fetch_refused",
+            Self::StoreUnavailable => "store_unavailable",
         }
     }
 
@@ -65,7 +96,11 @@ impl RefusalCode {
     pub const fn is_retryable(self) -> bool {
         matches!(
             self,
-            Self::RateLimited | Self::Unavailable | Self::Overloaded | Self::Timeout
+            Self::RateLimited
+                | Self::Unavailable
+                | Self::Overloaded
+                | Self::Timeout
+                | Self::StoreUnavailable
         )
     }
 }
@@ -92,6 +127,16 @@ mod tests {
             NotFound,
             MethodNotAllowed,
             Internal,
+            TenantInvalid,
+            FactInvalid,
+            ApprovalInvalid,
+            FactWithdrawn,
+            BriefInvalid,
+            RevisionConflict,
+            SpecInvalid,
+            AssetRefused,
+            FetchRefused,
+            StoreUnavailable,
         ];
         let mut seen = std::collections::HashSet::new();
         for code in all {

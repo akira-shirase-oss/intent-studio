@@ -32,7 +32,7 @@ use tracing::Level;
 
 use crate::{
     config::Config, error::ApiError, health::Health, intake, limiter::Limiter, metrics::Metrics,
-    operator,
+    operator, studio,
 };
 
 /// The request-id header.
@@ -268,11 +268,26 @@ async fn fallback() -> ApiError {
     ApiError::NotFound
 }
 
+/// Bounds for one group of routes: how long a request may take, and how large its body may be.
+macro_rules! bounded {
+    ($timeout:expr, $body_bytes:expr) => {
+        ServiceBuilder::new()
+            .layer(TimeoutLayer::with_status_code(
+                StatusCode::SERVICE_UNAVAILABLE,
+                $timeout,
+            ))
+            .layer(RequestBodyLimitLayer::new($body_bytes))
+            .layer(DefaultBodyLimit::max($body_bytes))
+    };
+}
+
 /// The router with its middleware, ready to serve.
 pub fn router(app: App) -> Router {
     let request_timeout = app.config.request_timeout;
     let workspace = app.config.workspace_dir.clone();
-    let mut router = Router::new()
+    // I0: intake, health, metrics, the operator session and inbox, the workspace app. Bodies
+    // are at most 16 KiB (D-019).
+    let mut spine = Router::new()
         .route("/healthz", get(healthz))
         .route("/readyz", get(readyz))
         .route("/metrics", get(metrics))
@@ -283,15 +298,46 @@ pub fn router(app: App) -> Router {
                 .get(operator::session)
                 .delete(operator::sign_out),
         )
-        .route("/v1/operator/leads", get(operator::inbox))
-        .fallback(fallback);
+        .route("/v1/operator/leads", get(operator::inbox));
     if let Some(dir) = workspace {
         let index = dir.join("200.html");
-        router = router.nest_service(
+        spine = spine.nest_service(
             "/workspace",
             ServeDir::new(dir).fallback(ServeFile::new(index)),
         );
     }
+    let spine = spine.layer(bounded!(request_timeout, MAX_BODY_BYTES));
+    // I1: the studio's records. Larger bodies (a brief, a page tree); each handler caps its own.
+    let studio = Router::new()
+        .route(
+            "/v1/operator/tenants",
+            get(studio::tenants).post(studio::create_tenant),
+        )
+        .route(
+            "/v1/operator/tenants/{tenant}/facts",
+            get(studio::facts).post(studio::create_fact),
+        )
+        .route(
+            "/v1/operator/tenants/{tenant}/facts/{fact}/approval",
+            post(studio::approve_fact),
+        )
+        .route(
+            "/v1/operator/tenants/{tenant}/facts/{fact}/withdrawal",
+            post(studio::withdraw_fact),
+        )
+        .route(
+            "/v1/operator/tenants/{tenant}/briefs",
+            get(studio::briefs).post(studio::create_brief),
+        )
+        .route(
+            "/v1/operator/tenants/{tenant}/briefs/{brief}",
+            get(studio::brief).put(studio::revise_brief),
+        )
+        .route(
+            "/v1/operator/tenants/{tenant}/briefs/{brief}/spec-check",
+            post(studio::spec_check),
+        )
+        .layer(bounded!(request_timeout, studio::SPEC_BODY_BYTES));
     let stack = ServiceBuilder::new()
         .layer(axum_mw::map_request(sanitize_request_id))
         .layer(SetRequestIdLayer::new(REQUEST_ID, MakeRequestUuidV7))
@@ -327,14 +373,13 @@ pub fn router(app: App) -> Router {
                 .on_failure(()),
         )
         .layer(axum_mw::from_fn(crate::error::envelope))
-        .layer(CatchPanicLayer::custom(panic_response))
-        .layer(TimeoutLayer::with_status_code(
-            StatusCode::SERVICE_UNAVAILABLE,
-            request_timeout,
-        ))
-        .layer(RequestBodyLimitLayer::new(MAX_BODY_BYTES))
-        .layer(DefaultBodyLimit::max(MAX_BODY_BYTES));
-    router.layer(stack).with_state(app)
+        // Timeouts and body caps are per route group (`bounded!`); the fallback reads nothing.
+        .layer(CatchPanicLayer::custom(panic_response));
+    spine
+        .merge(studio)
+        .fallback(fallback)
+        .layer(stack)
+        .with_state(app)
 }
 
 /// The address the server listens on, and the connect-info type its handlers extract.

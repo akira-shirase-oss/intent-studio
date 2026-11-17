@@ -8,6 +8,9 @@
 //! - Every query has a statement timeout and the pool an acquire timeout, so a slow or stopped
 //!   database turns into a bounded, typed [`DbError::Unavailable`], never a hang.
 //!
+//! - [`Db::save_brief`], [`Db::approve_fact`] and the other studio writes commit with their audit
+//!   row in one transaction and check the rows they depend on inside it (I1).
+//!
 //! Errors never carry lead content: Postgres's `DETAIL` (which can echo row values) is not part
 //! of any message this crate formats, and [`DbError::summary`] gives a log-safe line.
 
@@ -17,6 +20,7 @@ mod outbox;
 mod reconcile;
 mod seed;
 mod sessions;
+mod studio;
 
 use std::time::Duration;
 
@@ -30,6 +34,7 @@ pub use leads::{NewLead, StoreOutcome};
 pub use outbox::{AttemptRecord, ClaimedNotification, RecordResult};
 pub use reconcile::{OutboxTally, PrefixReport};
 pub use seed::{DEMO_TENANT, demo_site};
+pub use studio::{BriefRow, BriefSave, BriefSummary, FactChange, FactRow, LIST_MAX, TenantRow};
 
 /// Embedded migrations (`crates/intent-db/migrations`).
 pub static MIGRATOR: sqlx::migrate::Migrator = sqlx::migrate!("./migrations");

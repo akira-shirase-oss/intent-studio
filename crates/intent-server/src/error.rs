@@ -2,7 +2,8 @@
 //!
 //! `{"error": {"code": "...", "message": "...", "request_id": "...", "fields": [...]}}`. The
 //! code is the stable [`RefusalCode`]; the message is fixed text, never input; `fields` lists
-//! the refused fields and codes, never values. Each error is logged once, when it becomes a
+//! a lead's refused fields and codes, never values; `problems` lists a studio record's refused
+//! parts by path and code (the operator's own record, so an unbound claim names its token). Each error is logged once, when it becomes a
 //! response, at a level by fault — and never with lead content.
 
 use axum::{
@@ -13,7 +14,7 @@ use axum::{
     response::{IntoResponse, Response},
 };
 use intent_db::DbError;
-use intent_domain::{lead::FieldError, refusal::RefusalCode};
+use intent_domain::{lead::FieldError, problem::Problem, refusal::RefusalCode};
 use serde_json::json;
 
 /// Everything a handler can refuse with.
@@ -68,6 +69,83 @@ pub enum ApiError {
     /// 500. The cause goes to the log; the client sees only the code.
     #[error("internal error")]
     Internal(#[source] anyhow::Error),
+    /// 422: a studio record broke one or more rules; `problems` lists each by path and code.
+    #[error("{}", problems_message(*.code))]
+    Problems {
+        /// Which record (`brief_invalid`, `spec_invalid`, ...).
+        code: RefusalCode,
+        /// What was wrong, and where.
+        problems: Vec<Problem>,
+    },
+    /// 409: the brief changed since the revision this change was made from.
+    #[error(
+        "revision {latest} of this brief was saved after the one you edited; reload it and make your change again"
+    )]
+    RevisionConflict { latest: i32 },
+    /// 409: a withdrawn fact cannot be approved.
+    #[error("this fact was withdrawn and cannot be approved; record a new fact instead")]
+    FactWithdrawn,
+    /// 422: the asset worker refused the file; `reason` is a fixed code.
+    #[error("{}", asset_message(.reason))]
+    AssetRefused { reason: &'static str },
+    /// 422: the egress guard refused the address, or the fetch failed; `reason` is a fixed code.
+    #[error("the reference was not fetched: {}", fetch_message(.reason))]
+    FetchRefused { reason: &'static str },
+    /// 503: the content store is not configured or cannot be written.
+    #[error("the asset store is not available on this server; nothing was stored")]
+    StoreUnavailable,
+}
+
+fn problems_message(code: RefusalCode) -> &'static str {
+    match code {
+        RefusalCode::TenantInvalid => "the client's details broke one or more rules",
+        RefusalCode::FactInvalid => "the fact broke one or more rules",
+        RefusalCode::ApprovalInvalid => "the approval broke one or more rules",
+        RefusalCode::BriefInvalid => "the brief broke one or more rules",
+        RefusalCode::SpecInvalid => "the page tree broke one or more rules",
+        _ => "one or more parts were refused",
+    }
+}
+
+/// Plain words for each worker refusal code (`intent-render`'s `WorkerRefusal`).
+pub fn asset_message(reason: &str) -> &'static str {
+    match reason {
+        "unsupported_type" => {
+            "this type of file is not accepted; upload an SVG, PNG or JPEG image, or a TTF or OTF font"
+        }
+        "type_mismatch" => "the file's contents are not the type its name or upload says",
+        "malformed" => "the file is damaged or not a valid file of its type",
+        "too_large" => "the file is larger than the limit (10 MiB, 8,192 pixels a side)",
+        "worker_timeout" => "checking the file took too long, so it was stopped",
+        "worker_crashed" => {
+            "the file made the checker fail, so it was refused; nothing else was affected"
+        }
+        "worker_unavailable" => "the file checker could not be started on this server",
+        _ => "the file was refused",
+    }
+}
+
+/// Plain words for each egress refusal code (`intent-egress`'s `Refusal`).
+pub fn fetch_message(reason: &str) -> &'static str {
+    match reason {
+        "invalid_url" => "the address is not a valid web address",
+        "scheme_not_allowed" => "only http and https addresses can be fetched",
+        "credentials_in_url" => "addresses with a user name or password are not fetched",
+        "port_not_allowed" => "only the standard web ports (80 and 443) are fetched",
+        "address_forbidden" => {
+            "the address points to a private, local or reserved network, which is never fetched"
+        }
+        "dns_failed" => "the site's name could not be looked up",
+        "connect_failed" => "the site could not be reached",
+        "tls_failed" => "the site's secure connection could not be verified",
+        "too_many_redirects" => "the site redirected more than 3 times",
+        "redirect_downgrade" => "the site redirected from https to plain http",
+        "redirect_invalid" => "the site redirected to an invalid address",
+        "http_status" => "the site answered with an error instead of the page",
+        "too_large" => "the page is larger than the 5 MiB limit",
+        "timeout" => "the site did not answer within 10 seconds",
+        _ => "the fetch failed",
+    }
 }
 
 impl ApiError {
@@ -88,6 +166,12 @@ impl ApiError {
             Self::Unauthorized => RefusalCode::Unauthorized,
             Self::NotFound => RefusalCode::NotFound,
             Self::Internal(_) => RefusalCode::Internal,
+            Self::Problems { code, .. } => *code,
+            Self::RevisionConflict { .. } => RefusalCode::RevisionConflict,
+            Self::FactWithdrawn => RefusalCode::FactWithdrawn,
+            Self::AssetRefused { .. } => RefusalCode::AssetRefused,
+            Self::FetchRefused { .. } => RefusalCode::FetchRefused,
+            Self::StoreUnavailable => RefusalCode::StoreUnavailable,
         }
     }
 
@@ -97,13 +181,20 @@ impl ApiError {
             Self::MalformedBody | Self::Rejected => StatusCode::BAD_REQUEST,
             Self::PayloadTooLarge => StatusCode::PAYLOAD_TOO_LARGE,
             Self::UnsupportedMediaType => StatusCode::UNSUPPORTED_MEDIA_TYPE,
-            Self::Validation(_) => StatusCode::UNPROCESSABLE_ENTITY,
+            Self::Validation(_)
+            | Self::Problems { .. }
+            | Self::AssetRefused { .. }
+            | Self::FetchRefused { .. } => StatusCode::UNPROCESSABLE_ENTITY,
             Self::UnknownSite | Self::NotFound => StatusCode::NOT_FOUND,
             Self::RateLimited { .. } => StatusCode::TOO_MANY_REQUESTS,
-            Self::SubmissionConflict => StatusCode::CONFLICT,
-            Self::Unavailable(_) | Self::Overloaded | Self::Timeout | Self::SignInDisabled => {
-                StatusCode::SERVICE_UNAVAILABLE
+            Self::SubmissionConflict | Self::RevisionConflict { .. } | Self::FactWithdrawn => {
+                StatusCode::CONFLICT
             }
+            Self::Unavailable(_)
+            | Self::Overloaded
+            | Self::Timeout
+            | Self::SignInDisabled
+            | Self::StoreUnavailable => StatusCode::SERVICE_UNAVAILABLE,
             Self::Unauthorized => StatusCode::UNAUTHORIZED,
             Self::Internal(_) => StatusCode::INTERNAL_SERVER_ERROR,
         }
@@ -112,7 +203,7 @@ impl ApiError {
     fn retry_after(&self) -> Option<u64> {
         match self {
             Self::RateLimited { retry_after_secs } => Some(*retry_after_secs),
-            Self::Unavailable(_) => Some(2),
+            Self::Unavailable(_) | Self::StoreUnavailable => Some(2),
             Self::Overloaded | Self::Timeout => Some(1),
             _ => None,
         }
@@ -128,8 +219,12 @@ impl ApiError {
             Self::Unavailable(Some(db)) => {
                 tracing::warn!(code, db = %db.summary(), "lead not stored: database unavailable");
             }
-            Self::Unavailable(None) | Self::Overloaded | Self::Timeout => {
+            Self::Unavailable(None) | Self::Overloaded | Self::Timeout | Self::StoreUnavailable => {
                 tracing::warn!(code, "request refused");
+            }
+            // The reason codes are fixed strings, never input.
+            Self::AssetRefused { reason } | Self::FetchRefused { reason } => {
+                tracing::info!(code, reason, "request refused");
             }
             _ => tracing::debug!(code, "request refused"),
         }
@@ -154,6 +249,7 @@ pub struct PublicError {
     code: &'static str,
     message: String,
     fields: Option<serde_json::Value>,
+    problems: Option<serde_json::Value>,
 }
 
 impl PublicError {
@@ -178,6 +274,7 @@ impl PublicError {
             code: code.as_str(),
             message: message.to_owned(),
             fields: None,
+            problems: None,
         }
     }
 }
@@ -190,6 +287,9 @@ fn render(status: StatusCode, public: &PublicError, request_id: Option<&str>) ->
     });
     if let Some(fields) = &public.fields {
         error["fields"] = fields.clone();
+    }
+    if let Some(problems) = &public.problems {
+        error["problems"] = problems.clone();
     }
     let mut response = (status, axum::Json(json!({ "error": error }))).into_response();
     response.extensions_mut().insert(public.clone());
@@ -208,10 +308,28 @@ impl IntoResponse for ApiError {
             ),
             _ => None,
         };
+        let problems = match &self {
+            // The operator's own record, back to the operator: a path, a code and, for an
+            // unbound claim, the token (bounded). Never logged.
+            Self::Problems { problems, .. } => Some(
+                problems
+                    .iter()
+                    .map(|p| json!({ "path": p.path, "code": p.code.as_str(), "detail": p.detail }))
+                    .collect::<serde_json::Value>(),
+            ),
+            Self::RevisionConflict { latest } => Some(json!([{
+                "path": "expected_revision", "code": "revision_conflict", "latest_revision": latest
+            }])),
+            Self::AssetRefused { reason } | Self::FetchRefused { reason } => {
+                Some(json!([{ "path": "", "code": reason }]))
+            }
+            _ => None,
+        };
         let public = PublicError {
             code: self.code().as_str(),
             message: self.to_string(),
             fields,
+            problems,
         };
         let mut response = render(self.status(), &public, None);
         if let Some(secs) = self.retry_after() {

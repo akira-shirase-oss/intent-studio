@@ -18,4 +18,5 @@ pub mod operator;
 pub mod reconcile;
 pub mod serve;
 pub mod sites;
+pub mod studio;
 pub mod telemetry;

@@ -99,13 +99,13 @@ impl Default for SignInGate {
 }
 
 /// Who asked, for the audit: the client address and the request id.
-struct Caller {
-    address: String,
-    request_id: Option<String>,
+pub(crate) struct Caller {
+    pub(crate) address: String,
+    pub(crate) request_id: Option<String>,
 }
 
 impl Caller {
-    fn of(app: &App, peer: Peer, headers: &HeaderMap) -> Self {
+    pub(crate) fn of(app: &App, peer: Peer, headers: &HeaderMap) -> Self {
         let address =
             crate::intake::client_address_of(headers, peer.ip(), &app.config.trusted_proxies);
         let request_id = headers
@@ -118,7 +118,18 @@ impl Caller {
         }
     }
 
-    async fn audit(
+    /// An audit entry for an operator action, to commit with the action itself.
+    pub(crate) fn entry<'a>(&'a self, action: &'a str, detail: &'a str) -> AuditEntry<'a> {
+        AuditEntry {
+            action,
+            actor: "operator",
+            address: Some(&self.address),
+            request_id: self.request_id.as_deref(),
+            detail,
+        }
+    }
+
+    pub(crate) async fn audit(
         &self,
         app: &App,
         action: &str,
@@ -353,7 +364,7 @@ fn render(lead: &InboxLead) -> serde_json::Value {
     })
 }
 
-fn no_store(mut response: Response) -> Response {
+pub(crate) fn no_store(mut response: Response) -> Response {
     response
         .headers_mut()
         .insert(header::CACHE_CONTROL, HeaderValue::from_static("no-store"));
@@ -361,7 +372,7 @@ fn no_store(mut response: Response) -> Response {
 }
 
 /// 401 unless the request carries a live operator session (not expired, not idle too long).
-async fn require_operator(app: &App, headers: &HeaderMap) -> Result<(), ApiError> {
+pub(crate) async fn require_operator(app: &App, headers: &HeaderMap) -> Result<(), ApiError> {
     let Some(token) = session_token(headers, cookie_name(app)) else {
         return Err(ApiError::Unauthorized);
     };
