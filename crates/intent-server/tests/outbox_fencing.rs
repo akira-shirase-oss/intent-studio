@@ -171,3 +171,39 @@ async fn a_row_with_no_attempt_left_and_no_lease_is_swept_dead() {
     db.close().await;
     test.drop_database().await;
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "needs the stack: scripts/stack.sh up (run by scripts/drills.sh)"]
+async fn a_record_retried_after_its_answer_was_lost_is_not_called_a_lost_lease() {
+    let test = TestDb::create(1).await;
+    let db = Db::connect_lazy(&test.url, PoolLimits::default()).unwrap();
+    let id = one_lead(&db).await;
+    let owner = Uuid::now_v7();
+    let claimed = db
+        .claim_notifications(owner, 10, 8, LEASE * 20)
+        .await
+        .unwrap();
+    assert_eq!(claimed[0].attempt, 1);
+    let record = AttemptRecord {
+        id,
+        owner,
+        attempt: 1,
+        outcome: AttemptOutcome::Unavailable,
+        transition: Transition::RetryIn(Duration::from_secs(3600)),
+    };
+    // The first try commits, but its answer is lost (an I/O error): the notifier tries again.
+    assert_eq!(
+        db.record_attempt(&record).await.unwrap(),
+        RecordResult::Applied
+    );
+    let again = db.record_attempt(&record).await.unwrap();
+    assert_ne!(
+        again,
+        RecordResult::LeaseLost,
+        "a result already recorded by the first try was reported as a lost lease"
+    );
+    let (state, attempts, uncertain) = row(&test).await;
+    assert_eq!((state.as_str(), attempts, uncertain), ("pending", 1, 0));
+    db.close().await;
+    test.drop_database().await;
+}

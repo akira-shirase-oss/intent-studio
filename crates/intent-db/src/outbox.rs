@@ -79,6 +79,9 @@ pub enum RecordResult {
     /// The lease had expired and the row was claimed again or swept; this result is discarded
     /// (the other holder's result counts).
     LeaseLost,
+    /// This claim's result is already there: an earlier try committed it and only its answer
+    /// was lost (an I/O error), so the retry has nothing left to do.
+    AlreadyRecorded,
 }
 
 const CLAIM: &str = r"
@@ -187,8 +190,24 @@ impl Db {
             .execute(&self.pool)
             .await
             .map_err(classify)?;
-        Ok(if result.rows_affected() == 1 {
-            RecordResult::Applied
+        if result.rows_affected() == 1 {
+            return Ok(RecordResult::Applied);
+        }
+        // Nothing matched. Either this claim's own result is already there (the row still has
+        // the attempt number this claim was given, is released, and was not swept for an
+        // expired lease), or the row moved on without us.
+        let ours: Option<bool> = sqlx::query_scalar(
+            "SELECT attempts = $2 AND lease_owner IS NULL
+                    AND last_error IS DISTINCT FROM 'lease_expired'
+             FROM notification_outbox WHERE id = $1",
+        )
+        .bind(record.id.as_uuid())
+        .bind(i16::from(record.attempt))
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(classify)?;
+        Ok(if ours == Some(true) {
+            RecordResult::AlreadyRecorded
         } else {
             RecordResult::LeaseLost
         })
