@@ -40,6 +40,26 @@ impl Db {
         Ok(touched.rows_affected() == 1)
     }
 
+    /// Whether the operator signed in successfully from `address` within `within`.
+    pub async fn signed_in_from_recently(
+        &self,
+        address: &str,
+        within: Duration,
+    ) -> Result<bool, DbError> {
+        sqlx::query_scalar(
+            "SELECT EXISTS (SELECT 1 FROM operator_audit
+                            WHERE action = 'operator.sign_in' AND address = $1
+                              AND at > now() - $2 * interval '1 second')",
+        )
+        .bind(address)
+        .bind(f64::from(
+            u32::try_from(within.as_secs()).unwrap_or(u32::MAX),
+        ))
+        .fetch_one(&self.pool)
+        .await
+        .map_err(classify)
+    }
+
     /// Ends a session.
     pub async fn delete_session(&self, digest: &[u8; 32]) -> Result<(), DbError> {
         sqlx::query("DELETE FROM operator_sessions WHERE token_digest = $1 OR expires_at <= now()")

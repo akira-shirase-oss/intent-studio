@@ -509,6 +509,22 @@ starting values; changing one needs a measurement and a new entry.
   `one_address_cannot_hold_every_connection`, all failing before the
   change.
 
+- **D-052 — The global sign-in budget cannot be turned against the
+  operator.** D-041's two checks ran eagerly, so requests refused per
+  address (or for their content type) still drained the global budget,
+  and 25 junk posts from one address locked the operator out. Now the
+  per-address check runs alone first; a global token is taken only right
+  before a password is verified and is given back when it is right, so the
+  global budget counts failed verifications; and an address the operator
+  signed in from successfully in the last 30 days (the audit table) skips
+  the global budget, so a distributed flood cannot keep the operator out
+  of their usual place. The cost: from an address never used before, the
+  operator can still be held up by a distributed flood. The admission
+  rules take time as a parameter and are unit-tested with exact counts.
+  Proven by `operator::a_flood_from_one_address_cannot_lock_the_operator_out`
+  and `the_operators_known_address_gets_through_a_distributed_flood`
+  (both failed before the change) and the `SignInGate` unit tests.
+
 ## Open questions (still open)
 
 These need the maintainer or an outside party; each is in the README's

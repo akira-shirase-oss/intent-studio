@@ -58,10 +58,8 @@ pub struct Inner {
     pub address_limiter: Limiter<AddressKey>,
     /// Per-site lead limit.
     pub site_limiter: Limiter<SiteId>,
-    /// Per-address operator sign-in attempts.
-    pub sign_in_limiter: Limiter<AddressKey>,
-    /// Operator sign-in attempts from everywhere together (one key).
-    pub sign_in_global: Limiter<u8>,
+    /// Operator sign-in admission: per address, then a global budget for verifications.
+    pub sign_in: crate::operator::SignInGate,
     /// Concurrent password hashes (CPU-bound, run off the async workers).
     pub hash_gate: Arc<Semaphore>,
     /// Sites verified to accept leads (the per-site budget is charged only for these).
@@ -82,17 +80,11 @@ impl std::ops::Deref for App {
 impl App {
     /// Builds the state.
     pub fn new(config: Config, db: Db, health: Health) -> Self {
-        let quota = |per_minute| {
-            intent_domain::ratelimit::Quota::per_minute(per_minute).unwrap_or(config.address_quota)
-        };
-        let sign_in_quota = quota(intent_domain::limits::SIGN_IN_PER_ADDRESS_PER_MINUTE);
-        let sign_in_global_quota = quota(intent_domain::limits::SIGN_IN_GLOBAL_PER_MINUTE);
         Self(Arc::new(Inner {
             gate: Arc::new(Semaphore::new(config.max_in_flight)),
             address_limiter: Limiter::new(config.address_quota, config.rate_table_entries),
             site_limiter: Limiter::new(config.site_quota, config.rate_table_entries),
-            sign_in_limiter: Limiter::new(sign_in_quota, 10_000),
-            sign_in_global: Limiter::new(sign_in_global_quota, 16),
+            sign_in: crate::operator::SignInGate::new(),
             hash_gate: Arc::new(Semaphore::new(2)),
             connections: Arc::new(crate::conn::ConnectionStats::default()),
             sites: crate::sites::SiteDirectory::new(100_000, std::time::Duration::from_secs(60)),

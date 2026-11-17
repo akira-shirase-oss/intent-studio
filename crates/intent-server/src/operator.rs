@@ -19,6 +19,10 @@ use intent_domain::{
     ids::{LeadId, SiteId},
     ratelimit::{AddressKey, RetryAfter},
 };
+use intent_domain::{
+    limits::{SIGN_IN_GLOBAL_PER_MINUTE, SIGN_IN_PER_ADDRESS_PER_MINUTE},
+    ratelimit::Quota,
+};
 use serde::Deserialize;
 use serde_json::json;
 use sha2::{Digest as _, Sha256};
@@ -27,6 +31,7 @@ use time::format_description::well_known::Rfc3339;
 use crate::{
     app::{App, Peer},
     error::ApiError,
+    limiter::Limiter,
 };
 
 /// The session cookie's name when it is `Secure`: the `__Host-` prefix makes browsers refuse
@@ -42,6 +47,54 @@ fn cookie_name(app: &App) -> &'static str {
         COOKIE_SECURE
     } else {
         COOKIE_PLAIN
+    }
+}
+
+/// How long a successful sign-in makes its address "known" (D-052).
+const KNOWN_ADDRESS_WINDOW: Duration = Duration::from_hours(30 * 24);
+
+/// Operator sign-in admission, with time passed in so its rules are tested exactly (N3).
+///
+/// Per address first (5 a minute), and that check alone: a refused request never reaches the
+/// global budget. The global budget (20 a minute) is spent only right before a password is
+/// verified, and a right password gives its token back, so it counts failed verifications.
+pub struct SignInGate {
+    per_address: Limiter<AddressKey>,
+    global: Limiter<u8>,
+}
+
+impl SignInGate {
+    /// The D-041 quotas.
+    pub fn new() -> Self {
+        let quota = |per_minute| {
+            Quota::per_minute(per_minute)
+                .unwrap_or_else(|| unreachable!("invariant: the sign-in quotas are non-zero"))
+        };
+        Self {
+            per_address: Limiter::new(quota(SIGN_IN_PER_ADDRESS_PER_MINUTE), 10_000),
+            global: Limiter::new(quota(SIGN_IN_GLOBAL_PER_MINUTE), 16),
+        }
+    }
+
+    /// The per-address check.
+    pub fn admit(&self, address: AddressKey, now_ms: u64) -> Result<(), RetryAfter> {
+        self.per_address.check(address, now_ms)
+    }
+
+    /// Takes a global token right before a verification.
+    pub fn reserve(&self, now_ms: u64) -> Result<(), RetryAfter> {
+        self.global.check(0, now_ms)
+    }
+
+    /// Gives the token back after a right password.
+    pub fn give_back(&self) {
+        self.global.refund(0);
+    }
+}
+
+impl Default for SignInGate {
+    fn default() -> Self {
+        Self::new()
     }
 }
 
@@ -105,18 +158,11 @@ pub async fn sign_in(
     let caller = Caller::of(&app, peer, &headers);
     let address =
         crate::intake::client_address_of(&headers, peer.ip(), &app.config.trusted_proxies);
-    // Per address first, then everywhere together: guesses spread over many addresses are
-    // bounded too (D-041). The cost: during such an attack the operator may wait a minute.
-    let now = app.now_ms();
-    for check in [
-        app.sign_in_limiter.check(AddressKey::of(address), now),
-        app.sign_in_global.check(0, now),
-    ] {
-        if let Err(RetryAfter(secs)) = check {
-            return Err(ApiError::RateLimited {
-                retry_after_secs: secs,
-            });
-        }
+    // Per address first, alone: a request refused here never touches the global budget.
+    if let Err(RetryAfter(secs)) = app.sign_in.admit(AddressKey::of(address), app.now_ms()) {
+        return Err(ApiError::RateLimited {
+            retry_after_secs: secs,
+        });
     }
     // JSON only: a cross-site form cannot send it without a preflight.
     let is_json = headers
@@ -131,6 +177,24 @@ pub async fn sign_in(
     if password.is_empty() || password.len() > 1024 {
         return Err(ApiError::Unauthorized);
     }
+    // Only a request that reaches verification spends the global budget, and a right
+    // password gives its token back, so the budget counts failed verifications only. An
+    // address the operator signed in from in the last 30 days skips it altogether: a flood
+    // from elsewhere cannot lock the operator out of their usual place (D-052).
+    let known = app
+        .db
+        .signed_in_from_recently(&caller.address, KNOWN_ADDRESS_WINDOW)
+        .await?;
+    let reserved = if known {
+        false
+    } else {
+        if let Err(RetryAfter(secs)) = app.sign_in.reserve(app.now_ms()) {
+            return Err(ApiError::RateLimited {
+                retry_after_secs: secs,
+            });
+        }
+        true
+    };
     let permit = tokio::time::timeout(
         Duration::from_secs(2),
         app.hash_gate.clone().acquire_owned(),
@@ -156,6 +220,9 @@ pub async fn sign_in(
         return Err(ApiError::Unauthorized);
     }
 
+    if reserved {
+        app.sign_in.give_back();
+    }
     let token = new_token();
     app.db
         .create_session(&digest(&token), app.config.session_ttl)
@@ -337,6 +404,42 @@ fn digest(token: &str) -> [u8; 32] {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn key(n: u32) -> AddressKey {
+        AddressKey::V4(n)
+    }
+
+    #[test]
+    fn refusals_per_address_never_spend_the_global_budget() {
+        let gate = SignInGate::new();
+        let admitted = (0..25).filter(|_| gate.admit(key(1), 0).is_ok()).count();
+        assert_eq!(admitted, 5);
+        // All 20 global tokens are still there.
+        assert_eq!((0..25).filter(|_| gate.reserve(0).is_ok()).count(), 20);
+    }
+
+    #[test]
+    fn a_right_password_gives_its_global_token_back() {
+        let gate = SignInGate::new();
+        for _ in 0..20 {
+            gate.reserve(0).unwrap();
+        }
+        assert!(gate.reserve(0).is_err());
+        gate.give_back();
+        assert!(gate.reserve(0).is_ok());
+        assert!(gate.reserve(0).is_err());
+    }
+
+    #[test]
+    fn the_global_budget_refills_one_verification_every_three_seconds() {
+        let gate = SignInGate::new();
+        for _ in 0..20 {
+            gate.reserve(0).unwrap();
+        }
+        assert!(gate.reserve(2_999).is_err());
+        assert!(gate.reserve(3_000).is_ok());
+        assert!(gate.reserve(3_000).is_err());
+    }
 
     #[test]
     fn tokens_are_64_hex_digits_and_differ() {

@@ -149,6 +149,7 @@ async fn sign_in_has_a_global_budget_beyond_the_per_address_one() {
     let client = client();
     // Thirty guesses, each from a different address: the per-address limit never trips, the
     // global budget (20 a minute) does.
+    let started = std::time::Instant::now();
     let mut statuses = Vec::new();
     for n in 0..30 {
         let response = sign_in(
@@ -161,15 +162,93 @@ async fn sign_in_has_a_global_budget_beyond_the_per_address_one() {
         .await;
         statuses.push(response.status().as_u16());
     }
+    // The budget refills one verification every 3 s; exact counts are the unit tests' job
+    // (an injected clock), here a slow machine may let the refills of its own duration through.
+    let refills = usize::try_from(started.elapsed().as_secs() / 3).unwrap() + 1;
+    let failed = statuses.iter().filter(|s| **s == 401).count();
+    let limited = statuses.iter().filter(|s| **s == 429).count();
+    assert!((20..=20 + refills).contains(&failed), "{statuses:?}");
+    assert_eq!(failed + limited, 30, "{statuses:?}");
+    db.drop_database().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "needs the stack: scripts/stack.sh up (run by scripts/drills.sh)"]
+async fn a_flood_from_one_address_cannot_lock_the_operator_out() {
+    let db = TestDb::create(1).await;
+    let fixture = ProviderFixture::start(Mode::Ok).await;
+    let mut env = drill_env(&db, &fixture.url);
+    env.push(("INTENT_OPERATOR_PASSWORD_HASH".into(), hash()));
+    env.push(("INTENT_TRUSTED_PROXIES".into(), "127.0.0.1".into()));
+    let server = Server::start(env).await;
+    let client = client();
+    // 25 junk posts from one address: refused per address (or for their content type) before
+    // any password is checked, so none may spend the global budget.
+    for n in 0..25 {
+        let response = client
+            .post(format!("{}/v1/operator/session", server.base))
+            .header("x-forwarded-for", "10.72.0.1")
+            .header("content-type", "text/plain")
+            .body(format!("guess {n}"))
+            .send()
+            .await
+            .unwrap();
+        assert!(
+            matches!(response.status().as_u16(), 415 | 429),
+            "{}",
+            response.status()
+        );
+    }
+    let operator = sign_in(&client, &server.base, PASSWORD, "10.72.0.2", "req-op-1").await;
     assert_eq!(
-        statuses.iter().filter(|s| **s == 401).count(),
-        20,
-        "{statuses:?}"
+        operator.status(),
+        200,
+        "the operator was locked out by one address's flood"
     );
+    db.drop_database().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "needs the stack: scripts/stack.sh up (run by scripts/drills.sh)"]
+async fn the_operators_known_address_gets_through_a_distributed_flood() {
+    let db = TestDb::create(1).await;
+    let fixture = ProviderFixture::start(Mode::Ok).await;
+    let mut env = drill_env(&db, &fixture.url);
+    env.push(("INTENT_OPERATOR_PASSWORD_HASH".into(), hash()));
+    env.push(("INTENT_TRUSTED_PROXIES".into(), "127.0.0.1".into()));
+    let server = Server::start(env).await;
+    let client = client();
+    // The operator works from 10.73.0.1 and has signed in from there before.
     assert_eq!(
-        statuses.iter().filter(|s| **s == 429).count(),
-        10,
-        "{statuses:?}"
+        sign_in(&client, &server.base, PASSWORD, "10.73.0.1", "req-known")
+            .await
+            .status(),
+        200
     );
+    // Thirty wrong guesses, one from each of thirty addresses, drain the global budget.
+    let mut limited = 0;
+    for n in 0..30 {
+        let status = sign_in(
+            &client,
+            &server.base,
+            "guess",
+            &format!("10.74.0.{n}"),
+            "req-flood",
+        )
+        .await
+        .status();
+        limited += usize::from(status == 429);
+    }
+    assert!(limited > 0, "the global budget never ran out");
+    // From the known address, the right password still gets in.
+    let known = sign_in(&client, &server.base, PASSWORD, "10.73.0.1", "req-known-2").await;
+    assert_eq!(
+        known.status(),
+        200,
+        "the operator's known address was locked out"
+    );
+    // From an address never used before, the global budget applies (the documented cost).
+    let unknown = sign_in(&client, &server.base, PASSWORD, "10.75.0.1", "req-new").await;
+    assert_eq!(unknown.status(), 429);
     db.drop_database().await;
 }
