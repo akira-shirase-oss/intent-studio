@@ -1,0 +1,35 @@
+{
+	"name": "@intent-studio/workspace",
+	"private": true,
+	"version": "0.0.0",
+	"license": "MIT",
+	"description": "Intent Studio's workspace: a static SvelteKit app that intent-server serves at /workspace on its own origin. I0: operator sign-in and the read-only lead inbox.",
+	"type": "module",
+	"scripts": {
+		"dev": "vite dev",
+		"build": "vite build",
+		"preview": "vite preview",
+		"prepare": "svelte-kit sync || echo ''",
+		"check": "svelte-kit sync && svelte-check --tsconfig ./tsconfig.json --fail-on-warnings",
+		"test:e2e": "playwright test"
+	},
+	"dependencies": {
+		"@intent-studio/ui": "0.0.0"
+	},
+	"devDependencies": {
+		"@playwright/test": "1.64.1",
+		"@sveltejs/adapter-static": "4.0.0",
+		"@sveltejs/kit": "3.1.0",
+		"@sveltejs/vite-plugin-svelte": "7.3.1",
+		"@tailwindcss/vite": "4.3.3",
+		"@types/node": "24.19.2",
+		"svelte": "5.57.2",
+		"svelte-check": "4.7.7",
+		"tailwindcss": "4.3.3",
+		"typescript": "6.0.3",
+		"vite": "8.3.5"
+	},
+	"imports": {
+		"#lib/*": "./src/lib/*"
+	}
+}

@@ -1,0 +1,4 @@
+/* The workspace's styles: the UI kit's design system and nothing else. Tailwind doesn't scan
+ * dependencies, so name the package whose components use its classes. */
+@import '@intent-studio/ui/styles.css';
+@source '../../../packages/ui/src';

@@ -22,7 +22,7 @@ jobs:
   check:
     name: check (scripts/check.sh)
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    timeout-minutes: 40
     steps:
       # Third-party actions are pinned to commit SHAs.
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -33,11 +33,23 @@ jobs:
           channel=$(sed -n 's/^channel = "\(.*\)"$/\1/p' rust-toolchain.toml)
           rustup toolchain install "$channel" --profile minimal --component clippy,rustfmt
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: 24
+          cache: npm
+      - run: npm ci
+      - run: npx -w @intent-studio/workspace playwright install --with-deps chromium
       # Linux hands outgoing connections ports from 32768 to 60999, which includes the 59400–59499
       # range the stack and the drills listen on. Keep outgoing ports below it.
       - name: Keep outgoing ports below the stack's
         run: sudo sysctl -w net.ipv4.ip_local_port_range="20000 50999"
       - run: scripts/check.sh
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        if: failure()
+        with:
+          name: workspace-playwright
+          path: apps/workspace/test-results/
+          retention-days: 7
       - name: Stack logs
         if: failure()
         run: docker compose -p intent-studio -f deploy/compose.yaml logs --no-color --tail 200

@@ -6,3 +6,5 @@ node_modules/
 /packages/ui/.svelte-kit/
 /perf/out/
 .DS_Store
+/apps/workspace/test-results/
+/apps/workspace/playwright-report/

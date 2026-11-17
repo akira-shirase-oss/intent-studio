@@ -2,8 +2,9 @@
 # Runs what CI runs, in the same order. Run it before every push and check its exit code.
 #
 #   toolchain pin · fmt · clippy -D warnings · unit tests · architecture rules and the proof
-#   that they can fail · cargo-deny (when installed; CI runs it in its own job) · the I0 drills
-#   against the real binary and the local stack (needs Docker)
+#   that they can fail · cargo-deny (when installed; CI runs it in its own job) · the workspace
+#   app: svelte-check, the UI kit's tests, the build · the I0 drills against the real binary and
+#   the local stack (needs Docker) · the workspace in Chromium against the real server
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
@@ -32,7 +33,16 @@ else
     echo "cargo-deny not installed: skipped here (CI runs it in its own job)"
 fi
 
+step workspace
+[ -d node_modules ] || npm ci
+npm run check
+npm run test --workspace @intent-studio/ui
+npm run build --workspace @intent-studio/workspace
+
 step drills
 scripts/drills.sh
+
+step workspace-e2e
+scripts/workspace-e2e.sh
 
 printf '\ncheck ok\n'
