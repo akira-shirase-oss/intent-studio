@@ -51,6 +51,8 @@ pub struct InboxLead {
     pub message: String,
     /// A preview lead (D-027).
     pub is_test: bool,
+    /// The privacy-notice version consented under (D-044).
+    pub consent_notice: String,
     /// The lead's state, from its outbox row.
     pub state: LeadState,
     /// Attempts made so far.
@@ -91,7 +93,7 @@ pub struct AuditEntry<'a> {
 
 const PAGE: &str = r"
 SELECT l.id, l.tenant_id, l.site_id, s.name AS site_name, l.received_at, l.retain_until,
-       l.name, l.email, l.phone, l.service, l.area, l.message, l.is_test,
+       l.name, l.email, l.phone, l.service, l.area, l.message, l.is_test, l.consent_notice,
        o.state, o.attempts, o.uncertain_attempts, o.last_error, o.delivered_at,
        CASE WHEN o.state = 'pending' THEN o.next_attempt_at END AS next_attempt_at
 FROM leads l
@@ -136,6 +138,7 @@ impl Db {
                     area: row.try_get("area")?,
                     message: row.try_get("message")?,
                     is_test: row.try_get("is_test")?,
+                    consent_notice: row.try_get("consent_notice")?,
                     // A lead always has its outbox row (same statement); `Stored` is the safe
                     // reading if one were ever missing.
                     state: outbox.map_or(LeadState::Stored, |o| LeadState::of_stored(o, attempts)),

@@ -56,8 +56,9 @@ WITH site AS (
     WHERE s.id = $1 AND s.accepting_leads
 ), lead AS (
     INSERT INTO leads (id, tenant_id, site_id, submission_key, fingerprint, name, email, phone,
-                       message, service, area, consent, received_at, retain_until)
-    SELECT $2, site.tenant_id, site.id, $3, $4, $5, $6, $7, $8, $9, $10, true, $11,
+                       message, service, area, consent, consent_notice, received_at,
+                       retain_until)
+    SELECT $2, site.tenant_id, site.id, $3, $4, $5, $6, $7, $8, $9, $10, true, $13, $11,
            $11 + make_interval(days => site.retention_days::int)
     FROM site
     ON CONFLICT (site_id, submission_key) DO NOTHING
@@ -90,6 +91,7 @@ impl Db {
             .bind(lead.area())
             .bind(new.received_at)
             .bind(new.outbox_id.as_uuid())
+            .bind(lead.consent_notice())
             .fetch_optional(&self.pool)
             .await
             .map_err(classify)?;

@@ -34,6 +34,8 @@ pub const PHONE_MAX_DIGITS: usize = 15;
 pub const MESSAGE_MAX_CHARS: usize = 5_000;
 /// Longest accepted service-type and service-area fields.
 pub const SHORT_FIELD_MAX_CHARS: usize = 100;
+/// Longest privacy-notice version id (D-044).
+pub const CONSENT_NOTICE_MAX_CHARS: usize = 64;
 /// Client-supplied submission ids: length bounds.
 pub const SUBMISSION_ID_MIN_CHARS: usize = 8;
 /// Client-supplied submission ids: length bounds.

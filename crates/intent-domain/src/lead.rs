@@ -41,6 +41,8 @@ pub struct LeadForm {
     /// The visitor agreed to be contacted under the site's privacy notice (D-031).
     #[serde(default, deserialize_with = "consent_value")]
     pub consent: Option<bool>,
+    /// Which version of the privacy notice the form showed (D-044), e.g. `privacy-2026-11-16`.
+    pub consent_notice: Option<String>,
     /// The honeypot ([`HONEYPOT_FIELD`]).
     pub website: Option<String>,
 }
@@ -57,6 +59,7 @@ impl fmt::Debug for LeadForm {
             .field("service", &self.service.is_some())
             .field("area", &self.area.is_some())
             .field("consent", &self.consent)
+            .field("consent_notice", &self.consent_notice.is_some())
             .field("website", &self.website.is_some())
             .finish()
     }
@@ -81,6 +84,8 @@ pub enum Field {
     Area,
     /// `consent`
     Consent,
+    /// `consent_notice`
+    ConsentNotice,
     /// `email` or `phone`: neither was given.
     Contact,
 }
@@ -97,6 +102,7 @@ impl Field {
             Self::Service => "service",
             Self::Area => "area",
             Self::Consent => "consent",
+            Self::ConsentNotice => "consent_notice",
             Self::Contact => "contact",
         }
     }
@@ -206,6 +212,7 @@ pub struct ValidatedLead {
     message: String,
     service: Option<String>,
     area: Option<String>,
+    consent_notice: String,
 }
 
 impl fmt::Debug for ValidatedLead {
@@ -248,6 +255,10 @@ impl ValidatedLead {
     /// The service area, if given.
     pub fn area(&self) -> Option<&str> {
         self.area.as_deref()
+    }
+    /// The privacy-notice version the visitor consented under.
+    pub fn consent_notice(&self) -> &str {
+        &self.consent_notice
     }
 }
 
@@ -299,6 +310,10 @@ impl LeadForm {
             Field::Area,
             optional(self.area.as_deref(), SHORT_FIELD_MAX_CHARS, false),
         );
+        let consent_notice = check(
+            Field::ConsentNotice,
+            notice_version(self.consent_notice.as_deref()),
+        );
 
         let submission_id = match submission_id.as_deref().map(ClientSubmissionId::parse) {
             None => None,
@@ -326,8 +341,8 @@ impl LeadForm {
             });
         }
 
-        match name {
-            Some(name) if errors.is_empty() => Ok(ValidatedLead {
+        match (name, consent_notice) {
+            (Some(name), Some(consent_notice)) if errors.is_empty() => Ok(ValidatedLead {
                 submission_id,
                 name,
                 email,
@@ -335,6 +350,7 @@ impl LeadForm {
                 message: message.unwrap_or_default(),
                 service,
                 area,
+                consent_notice,
             }),
             _ => Err(Rejection::Invalid(errors)),
         }
@@ -384,6 +400,18 @@ fn required(raw: Option<&str>, max: usize, multiline: bool) -> Result<Option<Str
         Some(value) => Ok(Some(value)),
         None => Err(FieldCode::Required),
     }
+}
+
+/// The privacy-notice version: 1 to 64 characters of `A-Z a-z 0-9 . _ : -`, required.
+fn notice_version(raw: Option<&str>) -> Result<Option<String>, FieldCode> {
+    let value = required(raw, crate::limits::CONSENT_NOTICE_MAX_CHARS, false)?;
+    if value.as_deref().is_some_and(|v| {
+        !v.bytes()
+            .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'_' | b':' | b'-'))
+    }) {
+        return Err(FieldCode::InvalidCharacters);
+    }
+    Ok(value)
 }
 
 /// A shape check, not deliverability: one `@`, a non-empty local part of at most 64
@@ -479,6 +507,7 @@ mod tests {
             service: Some("boiler service".into()),
             area: Some("N1".into()),
             consent: Some(true),
+            consent_notice: Some("privacy-2026-11-16".into()),
             website: None,
         }
     }
@@ -535,6 +564,33 @@ mod tests {
                 (Field::Contact, FieldCode::ContactRequired),
                 (Field::Consent, FieldCode::ConsentRequired),
             ]
+        );
+    }
+
+    #[test]
+    fn the_consent_notice_version_is_required_and_plain() {
+        let lead = form().validate().unwrap();
+        assert_eq!(lead.consent_notice(), "privacy-2026-11-16");
+        assert_eq!(
+            codes(LeadForm {
+                consent_notice: None,
+                ..form()
+            }),
+            vec![(Field::ConsentNotice, FieldCode::Required)]
+        );
+        assert_eq!(
+            codes(LeadForm {
+                consent_notice: Some("v1 <script>".into()),
+                ..form()
+            }),
+            vec![(Field::ConsentNotice, FieldCode::InvalidCharacters)]
+        );
+        assert_eq!(
+            codes(LeadForm {
+                consent_notice: Some("v".repeat(65)),
+                ..form()
+            }),
+            vec![(Field::ConsentNotice, FieldCode::TooLong)]
         );
     }
 

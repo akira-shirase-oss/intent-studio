@@ -32,6 +32,7 @@ async fn one_lead(db: &Db) -> OutboxId {
         name: Some("Fencing".into()),
         email: Some("fencing@example.test".into()),
         consent: Some(true),
+        consent_notice: Some("privacy-v1".into()),
         ..LeadForm::default()
     }
     .validate()

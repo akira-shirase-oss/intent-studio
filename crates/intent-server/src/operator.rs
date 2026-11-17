@@ -274,6 +274,7 @@ fn render(lead: &InboxLead) -> serde_json::Value {
         "area": lead.area,
         "message": lead.message,
         "is_test": lead.is_test,
+        "consent_notice": lead.consent_notice,
         "state": lead.state.as_str(),
         "notification": {
             "attempts": lead.attempts,

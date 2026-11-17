@@ -174,6 +174,7 @@ mod tests {
             email: Some(email.into()),
             message: Some("hello".into()),
             consent: Some(true),
+            consent_notice: Some("privacy-v1".into()),
             ..LeadForm::default()
         }
         .validate()
@@ -195,6 +196,7 @@ mod tests {
             email: Some("x@y.test".into()),
             service: Some("c".into()),
             consent: Some(true),
+            consent_notice: Some("privacy-v1".into()),
             ..LeadForm::default()
         };
         let two = LeadForm {
@@ -202,6 +204,7 @@ mod tests {
             email: Some("x@y.test".into()),
             service: Some("bc".into()),
             consent: Some(true),
+            consent_notice: Some("privacy-v1".into()),
             ..LeadForm::default()
         };
         assert_ne!(

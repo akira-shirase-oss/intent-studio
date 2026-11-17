@@ -35,7 +35,7 @@ site=00000000-0000-4000-9000-000000000001
 for who in oldest middle newest; do
     name="E2E $(tr '[:lower:]' '[:upper:]' <<<"${who:0:1}")${who:1}"
     curl -sf -X POST "http://127.0.0.1:$port/v1/sites/$site/leads" -H 'content-type: application/json' \
-        -d "{\"submission_id\":\"e2e-lead-$who\",\"name\":\"$name\",\"email\":\"e2e.$who@example.test\",\"service\":\"boiler service\",\"area\":\"N1\",\"message\":\"A long message to see how the inbox wraps text on a phone, $who.\",\"consent\":true}" >/dev/null
+        -d "{\"submission_id\":\"e2e-lead-$who\",\"name\":\"$name\",\"email\":\"e2e.$who@example.test\",\"service\":\"boiler service\",\"area\":\"N1\",\"message\":\"A long message to see how the inbox wraps text on a phone, $who.\",\"consent\":true,\"consent_notice\":\"privacy-v1\"}" >/dev/null
     sleep 0.05
 done
 sleep 0.5

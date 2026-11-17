@@ -69,7 +69,8 @@ function lead(n) {
 		service: 'boiler service',
 		area: 'N1',
 		message: `Quote request ${n}: the boiler makes a noise when the heating starts.`,
-		consent: true
+		consent: true,
+		consent_notice: 'privacy-v1'
 	};
 }
 

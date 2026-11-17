@@ -429,6 +429,17 @@ starting values; changing one needs a measurement and a new entry.
   policy, the app booting with zero violations, a deep link under the same
   rules. It failed before the change.
 
+- **D-044 — A lead records the notice it consented under.** The form
+  sends `consent_notice`, the version id of the privacy notice it showed
+  (1–64 characters of `A-Z a-z 0-9 . _ : -`; the text itself is still
+  B-3), and the lead stores it beside `consent`. It is required: consent
+  without the notice it was given under proves little, and the site forms
+  this project generates always know the version. Leads stored before the
+  column existed read `unrecorded`. Proven by
+  `intake::the_consent_notice_version_is_required_and_stored_with_the_lead`
+  (it failed before the change: the field was refused as unknown) and the
+  domain's validation tests.
+
 ## Open questions (still open)
 
 These need the maintainer or an outside party; each is in the README's

@@ -106,7 +106,7 @@ async fn a_retried_submit_is_one_lead_sequentially_and_concurrently() {
 
     // A no-script form post without a submission id: the server derives the key, so a double
     // click is one lead too.
-    let form = "name=Formname+Person&phone=%2B44+20+7946+0001&message=hello&consent=on";
+    let form = "name=Formname+Person&phone=%2B44+20+7946+0001&message=hello&consent=on&consent_notice=privacy-v1";
     let post = |client: reqwest::Client| {
         let url = format!("{}/v1/sites/{site}/leads", server.base);
         async move {
@@ -358,6 +358,7 @@ async fn abuse_limits_hold_per_address_and_per_site() {
     env.push(("INTENT_TRUSTED_PROXIES".into(), "127.0.0.1".into()));
     let server = Server::start(env).await;
     let busy = site_for(1, 3);
+    let burst_started = Instant::now();
     let mut created = 0;
     let mut site_limited = 0;
     for n in 100..170_u64 {
@@ -377,8 +378,15 @@ async fn abuse_limits_hold_per_address_and_per_site() {
             other => panic!("unexpected {other:?}"),
         }
     }
-    assert_eq!(created, 60, "the per-site burst");
-    assert_eq!(site_limited, 10);
+    // The bucket refills one token a second, so a slow machine may legitimately let one more
+    // through for each second the 70 submissions took.
+    let refills = usize::try_from(burst_started.elapsed().as_secs()).unwrap();
+    assert!(
+        (60..=60 + refills).contains(&created),
+        "the per-site burst: {created} created in {:?}",
+        burst_started.elapsed()
+    );
+    assert_eq!(site_limited, 70 - created);
     let metrics = client
         .get(format!("{}/metrics", server.base))
         .send()
@@ -388,7 +396,9 @@ async fn abuse_limits_hold_per_address_and_per_site() {
         .await
         .unwrap();
     assert!(
-        metrics.contains("intent_intake_rate_limited_site_total 10\n"),
+        metrics.contains(&format!(
+            "intent_intake_rate_limited_site_total {site_limited}\n"
+        )),
         "{metrics}"
     );
     assert_no_leaks(&server.log(), &[&LeadSpec::new("abuse", 100).email]);
@@ -691,5 +701,49 @@ async fn every_forwarded_for_line_counts_so_a_client_cannot_pick_its_own_address
         vec![201, 201, 201, 201, 201, 429, 429],
         "the forged first line chose the rate-limit key"
     );
+    db.drop_database().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "needs the stack: scripts/stack.sh up (run by scripts/drills.sh)"]
+async fn the_consent_notice_version_is_required_and_stored_with_the_lead() {
+    let db = TestDb::create(1).await;
+    let fixture = ProviderFixture::start(Mode::Ok).await;
+    let server = trusted_server(&db, &fixture).await;
+    let client = client();
+    let site = site_for(0, 1);
+    let mut with = LeadSpec::new("notice", 1).json();
+    with["consent_notice"] = "privacy-2026-11-16".into();
+    let stored = submit(
+        &client,
+        &server.base,
+        site,
+        &with,
+        Some("10.80.0.1"),
+        1,
+        Instant::now(),
+    )
+    .await;
+    assert_eq!(stored.status, Some(201), "{stored:?}");
+    let mut conn = db.connect().await;
+    let notice: String = sqlx::query_scalar("SELECT consent_notice FROM leads")
+        .fetch_one(&mut conn)
+        .await
+        .unwrap();
+    assert_eq!(notice, "privacy-2026-11-16");
+    // Consent without the notice it was given under is refused, by field.
+    let mut without = LeadSpec::new("notice", 2).json();
+    without.as_object_mut().unwrap().remove("consent_notice");
+    let refused = submit(
+        &client,
+        &server.base,
+        site,
+        &without,
+        Some("10.80.0.2"),
+        2,
+        Instant::now(),
+    )
+    .await;
+    assert_eq!(refused.status, Some(422));
     db.drop_database().await;
 }
