@@ -407,6 +407,16 @@ starting values; changing one needs a measurement and a new entry.
   and `sign_in_has_a_global_budget_beyond_the_per_address_one`, both
   failing before the change.
 
+- **D-042 — No bidirectional controls or invisible characters in a
+  lead.** Every lead field refuses Unicode bidirectional controls
+  (U+202A–U+202E, U+2066–U+2069, U+200E, U+200F, U+061C) and invisible
+  characters (U+200B, U+200C, U+2060–U+2064, U+FEFF, U+180E) with
+  `invalid_characters`: an operator reading the inbox, or a client reading
+  the notification, must see what was typed. The zero-width joiner is
+  refused everywhere except the message, where emoji sequences need it.
+  Proven by `lead::tests::bidi_controls_and_invisible_characters_are_refused`,
+  which failed before the change.
+
 ## Open questions (still open)
 
 These need the maintainer or an outside party; each is in the README's

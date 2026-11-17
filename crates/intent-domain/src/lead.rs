@@ -349,11 +349,34 @@ fn optional(raw: Option<&str>, max: usize, multiline: bool) -> Result<Option<Str
     if value.chars().count() > max {
         return Err(FieldCode::TooLong);
     }
-    let allowed = |c: char| !c.is_control() || (multiline && matches!(c, '\n' | '\r' | '\t'));
+    let allowed = |c: char| {
+        !is_deceptive(c, multiline)
+            && (!c.is_control() || (multiline && matches!(c, '\n' | '\r' | '\t')))
+    };
     if !value.chars().all(allowed) {
         return Err(FieldCode::InvalidCharacters);
     }
     Ok(Some(value.to_owned()))
+}
+
+/// Bidirectional controls and invisible characters: they make text read differently from what
+/// it is (a right-to-left override reverses what follows; zero-width characters make two
+/// different names look the same). The zero-width joiner is allowed in the message only, where
+/// emoji sequences use it.
+fn is_deceptive(c: char, allow_joiner: bool) -> bool {
+    matches!(
+        c,
+        '\u{061C}'
+            | '\u{180E}'
+            | '\u{200B}'
+            | '\u{200C}'
+            | '\u{200E}'
+            | '\u{200F}'
+            | '\u{202A}'..='\u{202E}'
+            | '\u{2060}'..='\u{2064}'
+            | '\u{2066}'..='\u{2069}'
+            | '\u{FEFF}'
+    ) || (c == '\u{200D}' && !allow_joiner)
 }
 
 fn required(raw: Option<&str>, max: usize, multiline: bool) -> Result<Option<String>, FieldCode> {
@@ -572,6 +595,45 @@ mod tests {
             .validate()
             .is_ok()
         );
+    }
+
+    #[test]
+    fn bidi_controls_and_invisible_characters_are_refused() {
+        // A right-to-left override can make "evil.exe" read as "exe.live" in the inbox; zero-width
+        // characters make two different names look the same.
+        for (field, value) in [
+            (Field::Name, "Ada\u{202E}ecalevoL"),
+            (Field::Name, "Ada\u{200B}Lovelace"),
+            (Field::Name, "\u{2066}Ada\u{2069}"),
+            (Field::Name, "Ada\u{200D}"),
+            (Field::Service, "boiler\u{FEFF}"),
+            (Field::Area, "N1\u{200F}"),
+            (Field::Message, "pay \u{202D}here"),
+            (Field::Message, "hi\u{2060}there"),
+        ] {
+            let mut form = form();
+            match field {
+                Field::Name => form.name = Some(value.into()),
+                Field::Service => form.service = Some(value.into()),
+                Field::Area => form.area = Some(value.into()),
+                _ => form.message = Some(value.into()),
+            }
+            assert_eq!(
+                codes(form),
+                vec![(field, FieldCode::InvalidCharacters)],
+                "{value:?}"
+            );
+        }
+        assert_eq!(
+            email(Some("ada\u{200B}@example.test")),
+            Err(FieldCode::InvalidCharacters)
+        );
+        // A joiner inside an emoji sequence is ordinary text in a message.
+        let family = LeadForm {
+            message: Some("for my family \u{1F468}\u{200D}\u{1F469}\u{200D}\u{1F467}".into()),
+            ..form()
+        };
+        assert!(family.validate().is_ok());
     }
 
     #[test]
