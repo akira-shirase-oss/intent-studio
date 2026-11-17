@@ -1,0 +1,20 @@
+[package]
+name = "intent-provider-fixture"
+description = "A notification provider that can be told to accept, refuse (503), hang, or accept and then hang: the provider-down harness for drills and load runs. Development and test only."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+anyhow.workspace = true
+axum.workspace = true
+clap.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+tokio.workspace = true
+uuid.workspace = true
+
+[lints]
+workspace = true

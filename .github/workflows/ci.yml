@@ -33,7 +33,14 @@ jobs:
           channel=$(sed -n 's/^channel = "\(.*\)"$/\1/p' rust-toolchain.toml)
           rustup toolchain install "$channel" --profile minimal --component clippy,rustfmt
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+      # Linux hands outgoing connections ports from 32768 to 60999, which includes the 59400–59499
+      # range the stack and the drills listen on. Keep outgoing ports below it.
+      - name: Keep outgoing ports below the stack's
+        run: sudo sysctl -w net.ipv4.ip_local_port_range="20000 50999"
       - run: scripts/check.sh
+      - name: Stack logs
+        if: failure()
+        run: docker compose -p intent-studio -f deploy/compose.yaml logs --no-color --tail 200
 
   supply-chain:
     name: supply chain (cargo-deny)

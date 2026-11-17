@@ -2,7 +2,8 @@
 # Runs what CI runs, in the same order. Run it before every push and check its exit code.
 #
 #   toolchain pin · fmt · clippy -D warnings · unit tests · architecture rules and the proof
-#   that they can fail · cargo-deny (when installed; CI runs it in its own job)
+#   that they can fail · cargo-deny (when installed; CI runs it in its own job) · the I0 drills
+#   against the real binary and the local stack (needs Docker)
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
@@ -30,5 +31,8 @@ if command -v cargo-deny >/dev/null 2>&1; then
 else
     echo "cargo-deny not installed: skipped here (CI runs it in its own job)"
 fi
+
+step drills
+scripts/drills.sh
 
 printf '\ncheck ok\n'

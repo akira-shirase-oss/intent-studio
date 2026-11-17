@@ -1,0 +1,21 @@
+[package]
+name = "intent-db"
+description = "Intent Studio's PostgreSQL layer: migrations, the lead + outbox transaction, the leased outbox, the inbox and operator sessions."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+intent-domain.workspace = true
+sqlx.workspace = true
+thiserror.workspace = true
+time.workspace = true
+uuid.workspace = true
+
+[dev-dependencies]
+tokio.workspace = true
+
+[lints]
+workspace = true

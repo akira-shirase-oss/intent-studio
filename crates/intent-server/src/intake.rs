@@ -1,0 +1,199 @@
+//! `POST /v1/sites/{site}/leads`: the lead-intake path (D-005, D-019, invariant 5).
+//!
+//! Cheapest refusals first — shed when full, refuse while the database is down, per-address and
+//! per-site limits — then parse, validate, and store the lead with its outbox row under a
+//! deadline. Success (201, or 200 for a replay) is sent only after the commit returned; every
+//! other path is a refusal that acknowledges nothing, and the client may resend with the same
+//! submission id safely.
+
+use axum::{
+    Json,
+    body::Bytes,
+    extract::{ConnectInfo, Path, State, rejection::BytesRejection},
+    http::{HeaderMap, StatusCode, header},
+    response::{IntoResponse, Response},
+};
+use intent_db::{NewLead, StoreOutcome};
+use intent_domain::{
+    ids::{LeadId, OutboxId, SiteId},
+    lead::{LeadForm, Rejection},
+    ratelimit::{AddressKey, RetryAfter, client_address},
+    submission::{fingerprint, keys_for},
+};
+use serde::Serialize;
+use time::OffsetDateTime;
+use uuid::Uuid;
+
+use crate::{
+    app::{App, Peer},
+    error::ApiError,
+    metrics::Metrics,
+};
+
+/// The acknowledgment. Sent only for a committed lead.
+#[derive(Debug, Serialize)]
+pub struct Acknowledgment {
+    /// The lead.
+    pub lead_id: LeadId,
+    /// The client's submission id, or the key the server derived.
+    pub submission_id: String,
+    /// Always `stored`: the lead and its notification outbox row are committed.
+    pub status: &'static str,
+    /// True when this answers a resubmission of an already stored lead.
+    pub duplicate: bool,
+}
+
+/// The handler.
+pub async fn submit(
+    State(app): State<App>,
+    ConnectInfo(peer): ConnectInfo<Peer>,
+    Path(site): Path<String>,
+    headers: HeaderMap,
+    body: Result<Bytes, BytesRejection>,
+) -> Result<Response, ApiError> {
+    let metrics = &app.metrics;
+    let Ok(_permit) = app.gate.clone().try_acquire_owned() else {
+        Metrics::inc(&metrics.intake_shed_total);
+        return Err(ApiError::Overloaded);
+    };
+    let site: SiteId = site.parse().map_err(|_| ApiError::UnknownSite)?;
+    if !app.health.database_up() {
+        Metrics::inc(&metrics.intake_unavailable_total);
+        return Err(ApiError::Unavailable(None));
+    }
+
+    let forwarded = headers.get("x-forwarded-for").and_then(|v| v.to_str().ok());
+    let address = client_address(peer.ip(), forwarded, &app.config.trusted_proxies);
+    let now = app.now_ms();
+    if let Err(RetryAfter(secs)) = app.address_limiter.check(AddressKey::of(address), now) {
+        Metrics::inc(&metrics.intake_rate_limited_address_total);
+        return Err(ApiError::RateLimited {
+            retry_after_secs: secs,
+        });
+    }
+    if let Err(RetryAfter(secs)) = app.site_limiter.check(site, now) {
+        Metrics::inc(&metrics.intake_rate_limited_site_total);
+        return Err(ApiError::RateLimited {
+            retry_after_secs: secs,
+        });
+    }
+
+    let body = body.map_err(|rejection| {
+        if rejection.status() == StatusCode::PAYLOAD_TOO_LARGE {
+            ApiError::PayloadTooLarge
+        } else {
+            ApiError::MalformedBody
+        }
+    })?;
+    let form =
+        parse(&headers, &body).inspect_err(|_| Metrics::inc(&metrics.intake_invalid_total))?;
+    let lead = form.validate().map_err(|rejection| match rejection {
+        Rejection::Honeypot => {
+            Metrics::inc(&metrics.intake_honeypot_total);
+            ApiError::Rejected
+        }
+        Rejection::Invalid(fields) => {
+            Metrics::inc(&metrics.intake_invalid_total);
+            ApiError::Validation(fields)
+        }
+    })?;
+
+    let received_at = OffsetDateTime::now_utc();
+    let content = fingerprint(&lead);
+    let keys = keys_for(site, &lead, &content, received_at.unix_timestamp());
+    let new = NewLead {
+        id: LeadId::from_uuid(Uuid::now_v7()),
+        outbox_id: OutboxId::from_uuid(Uuid::now_v7()),
+        site,
+        key: &keys.primary,
+        previous_window: keys.previous_window.as_ref(),
+        fingerprint: content,
+        lead: &lead,
+        received_at,
+    };
+    let outcome =
+        match tokio::time::timeout(app.config.intake_deadline, app.db.store_lead(&new)).await {
+            Err(_elapsed) => {
+                // The commit may or may not have happened; either way nothing is acknowledged, and
+                // a resend with the same submission id finds the lead if it did.
+                Metrics::inc(&metrics.intake_timeouts_total);
+                return Err(ApiError::Timeout);
+            }
+            Ok(Err(error)) => {
+                if error.is_unavailable() {
+                    Metrics::inc(&metrics.intake_unavailable_total);
+                }
+                return Err(error.into());
+            }
+            Ok(Ok(outcome)) => outcome,
+        };
+    let submission_id = keys.primary.public().to_owned();
+    match outcome {
+        StoreOutcome::Created(lead_id) => {
+            Metrics::inc(&metrics.leads_created_total);
+            tracing::debug!(%lead_id, %site, "lead stored");
+            Ok(acknowledge(
+                StatusCode::CREATED,
+                lead_id,
+                submission_id,
+                false,
+            ))
+        }
+        StoreOutcome::Duplicate(lead_id) => {
+            Metrics::inc(&metrics.leads_replayed_total);
+            tracing::debug!(%lead_id, %site, "resubmission answered with the stored lead");
+            Ok(acknowledge(StatusCode::OK, lead_id, submission_id, true))
+        }
+        StoreOutcome::Conflict => {
+            Metrics::inc(&metrics.intake_conflicts_total);
+            Err(ApiError::SubmissionConflict)
+        }
+        StoreOutcome::UnknownSite => Err(ApiError::UnknownSite),
+    }
+}
+
+fn acknowledge(
+    status: StatusCode,
+    lead_id: LeadId,
+    submission_id: String,
+    duplicate: bool,
+) -> Response {
+    let mut response = (
+        status,
+        Json(Acknowledgment {
+            lead_id,
+            submission_id,
+            status: "stored",
+            duplicate,
+        }),
+    )
+        .into_response();
+    response.headers_mut().insert(
+        header::CACHE_CONTROL,
+        header::HeaderValue::from_static("no-store"),
+    );
+    response
+}
+
+/// JSON or a no-script form post. Parse errors are never echoed: serde messages can quote input.
+fn parse(headers: &HeaderMap, body: &[u8]) -> Result<LeadForm, ApiError> {
+    let content_type = headers
+        .get(header::CONTENT_TYPE)
+        .and_then(|v| v.to_str().ok())
+        .map(|v| {
+            v.split(';')
+                .next()
+                .unwrap_or_default()
+                .trim()
+                .to_ascii_lowercase()
+        });
+    match content_type.as_deref() {
+        Some("application/json") => {
+            serde_json::from_slice(body).map_err(|_| ApiError::MalformedBody)
+        }
+        Some("application/x-www-form-urlencoded") => {
+            serde_urlencoded::from_bytes(body).map_err(|_| ApiError::MalformedBody)
+        }
+        _ => Err(ApiError::UnsupportedMediaType),
+    }
+}

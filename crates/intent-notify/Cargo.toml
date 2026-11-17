@@ -1,0 +1,21 @@
+[package]
+name = "intent-notify"
+description = "Intent Studio's notification provider port: the webhook adapter the provider fixture speaks, and an in-memory recorder. The only crate besides intent-egress and intent-agent that may hold an HTTP client (D-032)."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+intent-domain.workspace = true
+reqwest.workspace = true
+serde.workspace = true
+thiserror.workspace = true
+
+[dev-dependencies]
+axum.workspace = true
+tokio.workspace = true
+
+[lints]
+workspace = true
