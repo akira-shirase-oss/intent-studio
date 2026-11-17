@@ -11,7 +11,8 @@
 		"preview": "vite preview",
 		"prepare": "svelte-kit sync || echo ''",
 		"check": "svelte-kit sync && svelte-check --tsconfig ./tsconfig.json --fail-on-warnings",
-		"test:e2e": "playwright test"
+		"test:e2e": "playwright test",
+		"test": "vitest run src"
 	},
 	"dependencies": {
 		"@intent-studio/ui": "0.0.0"
@@ -27,7 +28,8 @@
 		"svelte-check": "4.7.7",
 		"tailwindcss": "4.3.3",
 		"typescript": "6.0.3",
-		"vite": "8.3.5"
+		"vite": "8.3.5",
+		"vitest": "5.0.5"
 	},
 	"imports": {
 		"#lib/*": "./src/lib/*"

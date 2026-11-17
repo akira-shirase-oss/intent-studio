@@ -16,6 +16,7 @@ export interface InboxLead {
 	area: string | null;
 	message: string;
 	is_test: boolean;
+	consent_notice: string;
 	state: LeadState;
 	notification: {
 		attempts: number;
@@ -69,16 +70,26 @@ export const api = {
 	}
 };
 
-/** How a lead's notification reads in the inbox. */
+/**
+ * How a lead's notification reads in the inbox. Delivery is at least once: after an uncertain
+ * attempt (a timeout, or a lease that expired mid-attempt) the provider may have sent it already,
+ * so the inbox says so instead of implying exactly once.
+ */
 export function notificationLabel(lead: InboxLead): { text: string; variant: 'live' | 'pending' | 'attention' | 'draft' } {
-	const { attempts, last_error } = lead.notification;
+	const { attempts, last_error, uncertain_attempts } = lead.notification;
 	switch (lead.state) {
 		case 'delivered':
-			return { text: 'Notified', variant: 'live' };
+			return { text: uncertain_attempts > 0 ? 'Notified (may have been sent twice)' : 'Notified', variant: 'live' };
 		case 'notification_dead':
 			return { text: `Not notified (${attempts} attempts${last_error ? `, ${last_error.replaceAll('_', ' ')}` : ''})`, variant: 'attention' };
 		case 'notification_pending':
-			return { text: `Retrying (attempt ${attempts} failed)`, variant: 'pending' };
+			return {
+				text:
+					uncertain_attempts > 0
+						? `Retrying (attempt ${attempts} failed; an earlier one may have reached the provider)`
+						: `Retrying (attempt ${attempts} failed)`,
+				variant: 'pending'
+			};
 		default:
 			return { text: 'Saved, notifying', variant: 'draft' };
 	}

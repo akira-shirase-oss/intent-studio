@@ -51,6 +51,7 @@ step workspace
 [ -d node_modules ] || npm ci
 npm run check
 npm run test --workspace @intent-studio/ui
+npm run test --workspace @intent-studio/workspace
 npm run build --workspace @intent-studio/workspace
 
 step drills
