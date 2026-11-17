@@ -19,3 +19,16 @@ latency threshold missed on a busy machine is kept as a miss, not rerun until gr
 |---|---|---|---|---|---|---|---|---|
 | 2026-11-17 | realism (50/s, 60 s) | 3,001 | 50.0/s | 50bc7d0 (tooling uncommitted, see file) | 27.42 | 100% / 0 violations, all outbox rows delivered after recovery | 24.9 ms / 402 ms | **missed** p99 < 100 ms; others held |
 | 2026-11-17 | burst (250/s, 60 s) | 15,001 | 250.0/s | a5e0d6f | 44.87 | **invalid**: a stray server of mine shared the reused database and "delivered" outbox rows to its in-memory recorder; see the file's `contaminated` note | (6.1 ms / 64.8 ms, intake only) | not counted; rerun below |
+| 2026-11-17 | burst (250/s, 60 s), rerun | 15,001 | 250.0/s | 5df19c5 | 17.37 | 100% / 0 violations; 14,251 rows delivered = 14,251 provider acceptances, 0 duplicates | 1.2 ms / 15.3 ms | held (p99 < 100 ms, ack rate > 99.9%, 0 dropped) |
+| 2026-11-17 | notify-down (500/s, 100,000) | 99,230 (771 dropped) | 496.1/s | 5df19c5 | 16.07 (37.81 after; up to 78 during the drain) | 99.997% (3 honest 503s, 2 of them stored anyway) / 0 violations; 94,269 rows delivered = 94,269 provider acceptances, 0 duplicates, 0 uncertain | 4.7 ms / 109 ms | **missed** p99 < 100 ms and dropped < 10; ack rate held |
+
+## Owed
+
+- **A quiet-machine baseline.** No run above was made below load average 6; the realism and
+  burst runs are repeated on a quiet machine and the I0 intake budget (END_GOAL failure case 3)
+  is set from them in a decision entry. Until then the 100 ms p99 threshold is a proposal.
+- **The 100,000-submission `notify-down` smoke against that budget.** Its correctness held on
+  2026-11-17 (every acknowledged lead stored once, nothing lost or duplicated, every
+  notification delivered after recovery); its latency was measured on a busy machine only.
+- **The 1,000,000-submission run** (`scripts/load.sh full`, ROADMAP I3; the workspace
+  standard), only on a quiet machine, at the highest rate that holds the budget.

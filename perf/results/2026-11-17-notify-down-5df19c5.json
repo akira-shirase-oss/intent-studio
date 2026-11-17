@@ -1,0 +1,116 @@
+{
+  "scenario": "notify-down",
+  "run": "load-notify-down-20261117T020856Z",
+  "started": "2026-11-17T02:09:00Z",
+  "commit": "5df19c5cc143bc7b36e279e3cd2d6c76c9d9c473",
+  "machine": "Apple M2 Pro, 12 cores, 32 GiB, macOS 27.2.1",
+  "uptime_before": "21:09  up  7:36, 3 users, load averages: 16.07 17.47 27.44",
+  "uptime_after": "21:12  up  7:40, 3 users, load averages: 37.81 33.93 33.07",
+  "note": "Development observation on a shared laptop, not production capacity. The load generator, the server and Postgres (Docker) share the machine.",
+  "config": {
+    "rate_per_s": 500,
+    "total": 100000,
+    "p99_threshold_ms": 100,
+    "sites": 10000,
+    "provider": "fixture refusing with 503 for the whole run",
+    "resubmissions": "every 20th (5%)",
+    "retry_base_ms": 1000,
+    "db_connections": 32
+  },
+  "pass": false,
+  "k6_exit": 99,
+  "reconcile_exit": 0,
+  "k6": {
+    "iterations": 99230,
+    "achieved_rate_per_s": 496.12422138545685,
+    "dropped_iterations": 771,
+    "http_req_duration_ms": {
+      "p(99.9)": 613.0313700000052,
+      "max": 926.294,
+      "min": 0.582,
+      "med": 4.69,
+      "avg": 13.061546558500439,
+      "p(90)": 25.68,
+      "p(95)": 38.53309999999999,
+      "p(99)": 109.2841
+    },
+    "acknowledged_rate": 0.9999697672074978,
+    "refused": 3,
+    "unanswered": 0,
+    "replays": 4960,
+    "thresholds": {
+      "http_req_duration": {
+        "p(99)<100": {
+          "ok": false
+        }
+      },
+      "dropped_iterations": {
+        "count<10": {
+          "ok": false
+        }
+      },
+      "lead_acknowledged": {
+        "rate>0.999": {
+          "ok": true
+        }
+      }
+    }
+  },
+  "reconcile": {
+    "acknowledgments": 99227,
+    "acknowledged_submissions": 94267,
+    "stored_leads": 94269,
+    "stored_not_acknowledged": 2,
+    "outbox": {
+      "delivered/1": 33341,
+      "delivered/2": 10337,
+      "delivered/3": 14498,
+      "delivered/4": 10202,
+      "delivered/5": 17852,
+      "delivered/6": 8039
+    },
+    "uncertain_attempts": 0,
+    "violations": []
+  },
+  "provider_fixture": {
+    "at_end_of_run": {
+      "mode": "unavailable",
+      "attempts": 181503,
+      "accepted": 0,
+      "refused": 181503,
+      "hung": 0,
+      "unique_accepted": 0,
+      "duplicate_acceptances": 0,
+      "untracked": 0
+    },
+    "after_recovery": {
+      "mode": "ok",
+      "attempts": 275811,
+      "accepted": 94269,
+      "refused": 181542,
+      "hung": 0,
+      "unique_accepted": 94269,
+      "duplicate_acceptances": 0,
+      "untracked": 0
+    }
+  },
+  "notifier": {
+    "attempts": "275811",
+    "dead": "0",
+    "timeouts": "0",
+    "drain_seconds_after_recovery": 290
+  },
+  "intake": {
+    "shed": "0",
+    "unavailable": "3",
+    "address_table_keys": "98994",
+    "address_table_evictions": "236"
+  },
+  "log_lines_with_lead_content": 0,
+  "outbox_vs_provider": {
+    "delivered_rows": 94269,
+    "uncertain_attempts": 0,
+    "verdict": "ok"
+  },
+  "database": "intent_load_20261117t020856z"
+}
