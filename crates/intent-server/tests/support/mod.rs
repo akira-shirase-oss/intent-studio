@@ -70,6 +70,38 @@ pub fn server_binary() -> &'static str {
 pub struct TestDb {
     pub name: String,
     pub url: String,
+    dropped: bool,
+}
+
+/// Drops a test database from synchronous code (a `Drop`), on a runtime of its own.
+fn drop_database_blocking(name: &str) {
+    let name = name.to_owned();
+    let _ = std::thread::spawn(move || {
+        let Ok(runtime) = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+        else {
+            return;
+        };
+        runtime.block_on(async {
+            if let Ok(mut admin) = sqlx::PgConnection::connect(ADMIN_URL).await {
+                let sql = format!("DROP DATABASE IF EXISTS {name} WITH (FORCE)");
+                let _ = sqlx::query(sqlx::AssertSqlSafe(sql))
+                    .execute(&mut admin)
+                    .await;
+            }
+        });
+    })
+    .join();
+}
+
+impl Drop for TestDb {
+    /// A test that never reached `drop_database` (a failed assertion) still leaves no database.
+    fn drop(&mut self) {
+        if !self.dropped {
+            drop_database_blocking(&self.name);
+        }
+    }
 }
 
 impl TestDb {
@@ -96,20 +128,25 @@ impl TestDb {
                 .unwrap();
             assert!(status.success(), "intent-server {args:?} failed");
         }
-        Self { name, url }
+        Self {
+            name,
+            url,
+            dropped: false,
+        }
     }
 
     pub async fn connect(&self) -> sqlx::PgConnection {
         sqlx::PgConnection::connect(&self.url).await.unwrap()
     }
 
-    pub async fn drop_database(self) {
+    pub async fn drop_database(mut self) {
         if let Ok(mut admin) = sqlx::PgConnection::connect(ADMIN_URL).await {
             let sql = format!("DROP DATABASE IF EXISTS {} WITH (FORCE)", self.name);
             let _ = sqlx::query(sqlx::AssertSqlSafe(sql))
                 .execute(&mut admin)
                 .await;
         }
+        self.dropped = true;
     }
 
     /// Stored key → lead ids, for keys starting with `c:<prefix>`.
@@ -309,6 +346,10 @@ impl Server {
     }
 
     fn spawn(&mut self) {
+        // An abandoned start attempt's drop may have removed the directory.
+        if let Some(dir) = self.log_path.parent() {
+            std::fs::create_dir_all(dir).unwrap();
+        }
         let log = File::options()
             .create(true)
             .append(true)
@@ -381,6 +422,13 @@ impl Server {
 impl Drop for Server {
     fn drop(&mut self) {
         self.kill();
+        // The log stays when the test failed (it is what the failure message points at);
+        // otherwise the temporary directory goes.
+        if !std::thread::panicking()
+            && let Some(dir) = self.log_path.parent()
+        {
+            let _ = std::fs::remove_dir_all(dir);
+        }
     }
 }
 
