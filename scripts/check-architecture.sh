@@ -9,7 +9,10 @@
 #       intent-agent (the model port) and intent-notify (the operator-configured notification
 #       provider, D-032) — never in the server, the database layer or the domain;
 #   A4  intent-review may not depend on intent-publish (no code path from review to promotion);
-#   A5  the workspace app (apps/*, packages/*) never imports a database client.
+#   A5  the workspace app (apps/*, packages/*) never imports a database client;
+#   A6  untrusted bytes are decoded only in the worker (D-011, D-062): an image, font, XML or
+#       HTML parser may appear only in intent-worker, and intent-server neither depends on
+#       intent-worker nor pulls a decoder in transitively.
 #
 # Usage: scripts/check-architecture.sh [repository root]. The optional root lets
 # scripts/test-architecture-check.sh prove that every rule can fail.
@@ -66,6 +69,7 @@ has_dep() { # crate_dir, extended regex of names
 io_crates='tokio|tokio-util|tokio-postgres|async-std|smol|mio|socket2|sqlx|sqlx-.*|postgres|diesel|redis|reqwest|hyper|hyper-util|axum|tower|tower-http|ureq|isahc|surf|attohttpc|curl|tempfile|notify|fs-err|walkdir'
 provider_clients='async-openai|openai|openai-api-rs|anthropic|anthropic-sdk|misanthropy|genai|rig-core|ollama-rs|google-generativeai|aws-sdk-bedrockruntime|mistralai-client|cohere-rust|llm'
 http_clients='reqwest|ureq|isahc|surf|attohttpc|curl|awc'
+decoders='image|png|jpeg-decoder|zune-jpeg|gif|image-webp|webp|resvg|usvg|tiny-skia|roxmltree|xmlparser|quick-xml|xml-rs|xml5ever|ttf-parser|owned_ttf_parser|fontdb|allsorts|skrifa|read-fonts|lol_html|html5ever|scraper|kuchikiki|tl'
 db_clients='pg|postgres|@neondatabase/serverless|@vercel/postgres|@prisma/client|prisma|drizzle-orm|kysely|knex|sequelize|typeorm|mysql2|better-sqlite3|sqlite3|@supabase/supabase-js|@libsql/client'
 
 # A1: the domain is pure.
@@ -111,6 +115,26 @@ for dir in crates/*/; do
     esac
 done
 
+# A6: decoders only in the worker; the server never links one.
+for dir in crates/*/; do
+    dir="${dir%/}"
+    [ -f "$dir/Cargo.toml" ] || continue
+    name="$(basename "$dir")"
+    [ "$name" = intent-worker ] && continue
+    bad="$(deps_of "$dir" | grep -Ex "$decoders" || true)"
+    [ -z "$bad" ] || fail "A6 $name depends on a decoder ($(echo "$bad" | tr '\n' ' ')); only intent-worker may"
+done
+if [ -d crates/intent-server ] && has_dep crates/intent-server 'intent-worker'; then
+    fail "A6 intent-server depends on intent-worker; it runs the worker as a process (intent-render)"
+fi
+if [ -f Cargo.lock ] && [ -d crates/intent-server ] && command -v cargo >/dev/null 2>&1; then
+    resolved="$(cargo tree --locked --quiet -p intent-server -e normal,build --prefix none --format '{p}' 2>/dev/null \
+        | awk '{print $1}' | sort -u)" || resolved=""
+    [ -n "$resolved" ] || fail "A6 could not resolve intent-server's dependency tree (cargo tree failed)"
+    bad="$(echo "$resolved" | grep -Ex "$decoders|intent-worker" || true)"
+    [ -z "$bad" ] || fail "A6 intent-server pulls a decoder in transitively: $(echo "$bad" | tr '\n' ' ')"
+fi
+
 # A4: review never reaches publish.
 if [ -d crates/intent-review ] && has_dep crates/intent-review 'intent-publish'; then
     fail "A4 intent-review depends on intent-publish"
@@ -133,4 +157,4 @@ if [ "$failures" -gt 0 ]; then
     echo "architecture check failed: $failures rule violation(s)" >&2
     exit 1
 fi
-echo "architecture ok: A1 pure domain, A2 provider clients, A3 HTTP clients, A4 review/publish, A5 no database client in the workspace app"
+echo "architecture ok: A1 pure domain, A2 provider clients, A3 HTTP clients, A4 review/publish, A5 no database client in the workspace app, A6 decoders only in the worker"

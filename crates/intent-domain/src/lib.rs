@@ -16,6 +16,7 @@
 
 pub mod brief;
 pub mod claims;
+pub mod content;
 pub mod fact;
 pub mod ids;
 pub mod lead;

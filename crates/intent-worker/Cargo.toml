@@ -1,0 +1,24 @@
+[package]
+name = "intent-worker"
+description = "Intent Studio's asset worker (D-011, D-062): one process per untrusted file — an SVG sanitized to an allowlist by re-serialization, a PNG or JPEG decoded under pixel and memory limits and re-encoded without metadata, a TrueType or OpenType font parsed — with resource limits on itself. The only crate that may hold a decoder; intent-server never links it."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+# PNG and JPEG only, no threads (one job per process, CPU-limited).
+image = { workspace = true }
+intent-render.workspace = true
+rlimit.workspace = true
+roxmltree.workspace = true
+serde_json.workspace = true
+ttf-parser.workspace = true
+
+[dev-dependencies]
+rlimit.workspace = true
+tokio.workspace = true
+
+[lints]
+workspace = true

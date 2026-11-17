@@ -1,0 +1,25 @@
+[package]
+name = "intent-egress"
+description = "Intent Studio's egress guard (D-012, D-060): the only way to fetch a client-named URL. Every address is checked against a public-unicast policy before any connection opens, the DNS answer is pinned for the connection, every redirect is checked again, and time and size are bounded. It has no mode that turns the policy off."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+http-body-util.workspace = true
+hyper = { workspace = true, features = ["client"] }
+hyper-util.workspace = true
+rustls.workspace = true
+thiserror.workspace = true
+tokio.workspace = true
+tokio-rustls.workspace = true
+url.workspace = true
+webpki-roots.workspace = true
+
+[dev-dependencies]
+hyper = { workspace = true, features = ["server", "client"] }
+
+[lints]
+workspace = true

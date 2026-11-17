@@ -168,7 +168,7 @@ fn fact_row(row: &PgRow) -> Result<FactRow, DbError> {
     })
 }
 
-async fn audit_in(
+pub(crate) async fn audit_in(
     tx: &mut Transaction<'_, Postgres>,
     entry: &AuditEntry<'_>,
 ) -> Result<(), DbError> {

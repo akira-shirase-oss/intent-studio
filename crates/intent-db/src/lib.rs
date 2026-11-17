@@ -14,6 +14,7 @@
 //! Errors never carry lead content: Postgres's `DETAIL` (which can echo row values) is not part
 //! of any message this crate formats, and [`DbError::summary`] gives a log-safe line.
 
+mod assets;
 mod inbox;
 mod leads;
 mod outbox;
@@ -29,6 +30,7 @@ use sqlx::{
     postgres::{PgConnectOptions, PgPool, PgPoolOptions},
 };
 
+pub use assets::{AssetRow, NewAsset, NewSnapshot, SnapshotRow};
 pub use inbox::{AuditEntry, InboxLead, InboxQuery};
 pub use leads::{NewLead, StoreOutcome};
 pub use outbox::{AttemptRecord, ClaimedNotification, RecordResult};

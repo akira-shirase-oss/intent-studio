@@ -15,8 +15,11 @@ publish = false
 # Internal crates.
 intent-domain = { path = "crates/intent-domain" }
 intent-db = { path = "crates/intent-db" }
+intent-egress = { path = "crates/intent-egress" }
 intent-notify = { path = "crates/intent-notify" }
 intent-provider-fixture = { path = "crates/intent-provider-fixture" }
+intent-render = { path = "crates/intent-render" }
+intent-store = { path = "crates/intent-store" }
 
 # External crates: versions live here only (rust-mastery chapter 15). Minimal features;
 # one async runtime (Tokio); no TLS stack until the first real provider adapter needs one.
@@ -29,6 +32,8 @@ fastrand = "2.4"
 hashlink = "0.11"
 hex = "0.4.3"
 http-body-util = "0.1.5"
+# The asset worker's decoders (intent-worker only; scripts/check-architecture.sh, A6).
+image = { version = "0.25.10", default-features = false, features = ["png", "jpeg"] }
 # Driven directly for connection-level bounds (header-read timeout, connection cap); axum::serve
 # exposes none of them.
 hyper = { version = "1.12", features = ["server", "http1"] }
@@ -36,6 +41,11 @@ hyper-util = { version = "0.1.21", features = ["tokio", "service"] }
 # Plain HTTP only in I0: the provider fixture is local. TLS (rustls) arrives with the first
 # real provider adapter, so no TLS stack is compiled before something needs it.
 reqwest = { version = "0.13.5", default-features = false, features = ["json"] }
+rlimit = "0.11.0"
+roxmltree = "0.21.2"
+# TLS for the egress guard only: rustls with the ring provider (one TLS stack, no OpenSSL, no
+# C toolchain beyond ring's) and the Mozilla root set compiled in.
+rustls = { version = "0.23.46", default-features = false, features = ["ring", "std", "tls12"] }
 serde = { version = "1.0.229", features = ["derive"] }
 serde_json = "1.0.154"
 # The path of a JSON shape error (`pages[0].sections[2]`), without echoing the serde message.
@@ -46,13 +56,16 @@ sqlx = { version = "0.9.0", default-features = false, features = ["runtime-tokio
 thiserror = "2.0.21"
 time = { version = "0.3.55", default-features = false, features = ["std", "serde", "formatting", "parsing"] }
 tokio = { version = "1.54", features = ["rt-multi-thread", "macros", "net", "signal", "sync", "time", "process", "io-util"] }
+tokio-rustls = { version = "0.26.6", default-features = false, features = ["ring", "tls12"] }
 tokio-util = { version = "0.7.20", features = ["rt"] }
 tower = { version = "0.5.3", features = ["util"] }
 tower-http = { version = "0.7.1", features = ["request-id", "trace", "timeout", "limit", "catch-panic", "fs"] }
 tracing = "0.1.44"
+ttf-parser = { version = "0.25.1", default-features = false, features = ["std", "opentype-layout", "apple-layout", "variable-fonts", "glyph-names"] }
 tracing-subscriber = { version = "0.3.23", features = ["env-filter", "json"] }
 url = "2.5.8"
 uuid = { version = "1.29", default-features = false, features = ["std", "serde"] }
+webpki-roots = "1.0.12"
 
 [workspace.lints.rust]
 unsafe_code = "forbid"

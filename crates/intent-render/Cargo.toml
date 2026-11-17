@@ -1,0 +1,17 @@
+[package]
+name = "intent-render"
+description = "Intent Studio's job driver for the isolated worker (D-011, D-062): runs one untrusted-input job per worker process with no environment, a deadline and bounded output, and turns every failure — a crash included — into a named refusal. Holds no decoder."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+tokio.workspace = true
+
+[lints]
+workspace = true

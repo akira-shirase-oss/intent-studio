@@ -1,0 +1,20 @@
+[package]
+name = "intent-store"
+description = "Intent Studio's content-addressed store (D-016): immutable blobs under their SHA-256 on the local filesystem, written atomically and verified on every read."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+intent-domain.workspace = true
+thiserror.workspace = true
+tokio.workspace = true
+uuid = { workspace = true, features = ["v4"] }
+
+[dev-dependencies]
+tokio.workspace = true
+
+[lints]
+workspace = true

@@ -64,6 +64,9 @@ expect_fail server-provider A2 "add_dep crates/intent-server/Cargo.toml 'async-o
 expect_fail server-http-client A3 "add_dep crates/intent-server/Cargo.toml 'reqwest.workspace = true'"
 expect_fail review-publish A4 "printf 'intent-publish.workspace = true\n' >> crates/intent-review/Cargo.toml"
 expect_fail app-db-dependency A5 "printf '{\"name\":\"w\",\"dependencies\":{\"pg\":\"8\"}}\n' > apps/workspace/package.json"
+expect_fail server-decoder A6 "add_dep crates/intent-server/Cargo.toml 'image.workspace = true'"
+expect_fail server-links-worker A6 "add_dep crates/intent-server/Cargo.toml 'intent-worker.workspace = true'"
+expect_fail store-xml-parser A6 "mkdir -p crates/intent-store && printf '[package]\nname = \"intent-store\"\n\n[dependencies]\nroxmltree = \"0.21\"\n' > crates/intent-store/Cargo.toml"
 expect_fail app-db-import A5 "printf \"import postgres from 'postgres';\n\" >> apps/workspace/src/app.ts"
 
 echo "architecture check self-test ok: the clean tree passes and $passed planted violations fail"
