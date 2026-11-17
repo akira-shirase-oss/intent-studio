@@ -15,6 +15,22 @@ export default defineConfig({
 			// the operator's session cookie needs no CORS. It holds no authority and never talks to
 			// the database (scripts/check-architecture.sh, rule A5).
 			adapter: adapter({ pages: 'build', assets: 'build', fallback: '200.html' }),
+			// The page's own policy pins every inline script by hash. frame-ancestors cannot be
+			// set from a page, so intent-server sends it, with object-src and base-uri, as a header.
+			csp: {
+				mode: 'hash',
+				directives: {
+					'default-src': ['self'],
+					'script-src': ['self'],
+					'style-src': ['self', 'unsafe-inline'],
+					'img-src': ['self', 'data:'],
+					'font-src': ['self', 'data:'], // Vite inlines small font subsets as data: URLs
+					'connect-src': ['self'],
+					'base-uri': ['none'],
+					'object-src': ['none'],
+					'form-action': ['self']
+				}
+			},
 			paths: { base: '/workspace', relative: false }
 		})
 	],

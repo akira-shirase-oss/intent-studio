@@ -45,3 +45,26 @@ test('the operator signs in with the keyboard alone, reads the inbox and signs o
 	const after = await page.request.get('/v1/operator/leads');
 	expect(after.status()).toBe(401);
 });
+
+test('the workspace runs under a content security policy and cannot be framed', async ({ page }) => {
+	await page.addInitScript(() => {
+		const store = window as unknown as { __csp?: string[] };
+		store.__csp = [];
+		document.addEventListener('securitypolicyviolation', (event) => store.__csp?.push(event.violatedDirective));
+	});
+	const response = await page.goto('/workspace/');
+	const headers = response?.headers() ?? {};
+	expect(headers['content-security-policy']).toContain("frame-ancestors 'none'");
+	expect(headers['content-security-policy']).toContain("object-src 'none'");
+	expect(headers['referrer-policy']).toBe('no-referrer');
+	expect(headers['x-frame-options']).toBe('DENY');
+	// Scripts are pinned by hash in the page's own policy: an injected inline script would not run.
+	const meta = await page.locator('meta[http-equiv="content-security-policy"]').getAttribute('content');
+	expect(meta).toContain("script-src 'self' 'sha256-");
+	// The app still boots under the policy, without a single violation.
+	await expect(page.getByRole('heading', { name: 'Operator sign-in' })).toBeVisible();
+	expect(await page.evaluate(() => (window as unknown as { __csp?: string[] }).__csp ?? [])).toEqual([]);
+	// A deep link is served by the fallback page under the same rules.
+	const deep = await page.goto('/workspace/some/deep/link');
+	expect(deep?.headers()['content-security-policy']).toContain("frame-ancestors 'none'");
+});

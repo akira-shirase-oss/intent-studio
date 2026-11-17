@@ -273,6 +273,23 @@ pub fn router(app: App) -> Router {
             header::X_CONTENT_TYPE_OPTIONS,
             HeaderValue::from_static("nosniff"),
         ))
+        // Nothing here may be framed, load plugins or rebase relative URLs; the workspace's
+        // pages add their own script policy (hashes) in a meta tag. No referrer leaves the
+        // workspace (its URLs can name sites and leads).
+        .layer(SetResponseHeaderLayer::overriding(
+            header::CONTENT_SECURITY_POLICY,
+            HeaderValue::from_static(
+                "frame-ancestors 'none'; base-uri 'none'; object-src 'none'; form-action 'self'",
+            ),
+        ))
+        .layer(SetResponseHeaderLayer::overriding(
+            header::X_FRAME_OPTIONS,
+            HeaderValue::from_static("DENY"),
+        ))
+        .layer(SetResponseHeaderLayer::overriding(
+            header::REFERRER_POLICY,
+            HeaderValue::from_static("no-referrer"),
+        ))
         .layer(
             TraceLayer::new_for_http()
                 .make_span_with(make_span)

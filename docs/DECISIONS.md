@@ -417,6 +417,18 @@ starting values; changing one needs a measurement and a new entry.
   Proven by `lead::tests::bidi_controls_and_invisible_characters_are_refused`,
   which failed before the change.
 
+- **D-043 — The workspace's security headers.** Every response carries
+  `Content-Security-Policy: frame-ancestors 'none'; base-uri 'none';
+  object-src 'none'; form-action 'self'`, `X-Frame-Options: DENY` and
+  `Referrer-Policy: no-referrer`; the workspace's pages add their own
+  policy in a meta tag, built by SvelteKit, that pins every inline script
+  by hash (`default-src 'self'`; fonts may also be `data:`, which Vite uses
+  for small subsets). Proven in Chromium by
+  `the workspace runs under a content security policy and cannot be
+  framed` (`scripts/workspace-e2e.sh`): the headers, the hashed script
+  policy, the app booting with zero violations, a deep link under the same
+  rules. It failed before the change.
+
 ## Open questions (still open)
 
 These need the maintainer or an outside party; each is in the README's
