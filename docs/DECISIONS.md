@@ -580,6 +580,98 @@ starting values; changing one needs a measurement and a new entry.
   results stay development observations (D-025), and a production host is
   measured on its own.
 
+- **D-055 — I1 is built in its smallest gate-meeting form.** The row names
+  a schema, fact records, the page-tree spec and validator, the claim
+  lint, the content-addressed store, `intent-egress`, the asset worker and
+  reference notes, then (blocked, B-1) the component set. What that means
+  here: facts and their approvals, briefs with revisions, and a
+  `spec-check` endpoint that validates a page tree against a brief and the
+  tenant's facts — storing page trees is I2's job, with candidates; the
+  reference notes are the brief's references (address, permission, notes)
+  plus a snapshot fetched through the egress guard into the store, whose
+  bytes are kept and not parsed (parsing is the worker's, at I2); the
+  asset worker sanitizes SVG and decodes PNG, JPEG and TrueType/OpenType
+  fonts (D-062); the operator does all of this in the workspace, which
+  gains Facts, Briefs and Assets screens (D-063), and every operator
+  action is audited (D-015). Out of I1: the generation loop, parsing
+  references, WOFF2 and WebP, rendering components. The gate's second half
+  — components rendering a spec deterministically at three viewports —
+  stays blocked on B-1. Cost: the spec check proves the vocabulary and the
+  rules before any page exists, so a rule may still change when the first
+  component is built against it.
+
+- **D-056 — Facts: immutable content, recorded approvals, calendar days.**
+  A fact's kind, statement, source and contact link are written once; a
+  corrected statement is a new fact, so a page that referenced a fact
+  always meant what was approved. What changes is its approval: until
+  approval links exist (I3, D-015) the operator records it on the
+  client's behalf — who approved, the day they approved, and a review-by
+  date at most 90 days later (30 for prices and opening hours, D-013),
+  earlier if the operator chooses; recording a later approval
+  re-confirms the fact. Approvals are calendar days in UTC, never in the
+  future and at most ten years back; a fact is current through its
+  review-by day and stale from the day after. A withdrawn fact stays on
+  record and is never usable again. Only contact facts carry a link, and
+  exactly one: a phone number (stored as dialled), an e-mail address, or
+  an `https` address. Every write and its audit row commit in one
+  transaction. Cost: a typo in an approved statement means a new fact
+  and a new approval; a client in a time zone far from UTC sees review
+  dates shift by a day at the edges.
+
+- **D-057 — The brief.** Fields and bounds: business name (1–120),
+  goal (`quote_requests`, the one pattern, D-009), intent and audience
+  (1–1,000 each), 1–20 services (names unique ignoring case, 1–80;
+  descriptions up to 500), brand (tone up to 200, up to six `#rrggbb`
+  colours, an uploaded logo asset of the tenant), up to five client
+  domains (host names, the only addresses pages may link to besides
+  contact facts, D-014), up to ten references, and up to 50 approved
+  claims. A reference is an `http` or `https` address, a permission —
+  `inspiration_only` (look only), `own_content` (the client's own site:
+  its text and images may be reused) or `licensed_assets` (images under
+  the licence the notes must name) — and notes up to 2,000 characters.
+  Claims must be approved, current facts of the same tenant when the
+  brief is saved (and a database foreign key keeps them in the tenant);
+  they are checked again whenever a page tree is. A brief is a sequence
+  of revisions: a change names the revision it was made from and is
+  refused with `revision_conflict` if another was saved first. The stored
+  form is the validated brief's own JSON, re-validated whenever it is
+  read back. Cost: stricter than a free-form intake — anything the
+  schema has no field for goes into intent or notes.
+
+- **D-058 — The page tree's vocabulary, `quote-request@0`.** Ten
+  components: hero, services, testimonials, trust, service area, hours,
+  contact, quote form, text and footer. Every slot is typed: headings and
+  body text (plain, or bound to facts that support its claims), claim
+  slots that hold only a fact id of the kinds the slot allows
+  (testimonials take testimonials; trust takes metrics, licences,
+  certifications, insurance and guarantees; prices, service areas, hours,
+  contact details and legal promises each have their own slots), and
+  link targets with four forms only — an anchor on the page, a page of
+  the tree, a contact fact's link, or an `https` address on one of the
+  brief's domains (no port, no credentials, exact host). There is no
+  "any URL" and no HTML. A tree has 1–5 pages including `/`, 1–20
+  sections each, and the home page must hold a quote form whose services
+  are the brief's. A claim slot must name a fact the brief lists; a fact
+  the brief does not list is `fact_not_in_brief` even when approved.
+  Unknown components and fields fail parsing, reported by path. Cost: a
+  page cannot say anything the vocabulary lacks a slot for; adding one is
+  a new component-set version.
+
+- **D-059 — `claim-lint v1`.** Flags every number, price (a number after
+  a currency sign), percentage, year (1900–2099) and claim word — D-013's
+  list (licensed, insured, certified, guarantee, warranty, #1, best) and,
+  by prefix, licence/license, insurance, certification, accredited,
+  award and approved — in every free-text slot, titles, descriptions and
+  button labels included. A flagged token is supported only when a fact
+  bound to that slot contains the same token (a number as a whole number:
+  500 is not supported by 1500); otherwise it is `unbound_claim` with the
+  token as its detail. When a bound fact itself is unusable, that is the
+  reported problem and the lint is not run on the slot. Proven by
+  `claims::tests` and `page_tree::tests::invented_claims_in_free_text_are_unbound`.
+  Cost: plain copy with a number ("open 7 days") needs a bound fact or a
+  re-word; the lint is versioned data, and changing it changes the
+  version.
+
 ## Open questions (still open)
 
 These need the maintainer or an outside party; each is in the README's

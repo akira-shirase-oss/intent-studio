@@ -9,12 +9,21 @@
 //! notification retry schedule ([`outbox`]), the abuse limits ([`limits`], [`ratelimit`]),
 //! retention ([`retention`]), the notification text ([`notification`]) and the stable refusal
 //! codes clients branch on ([`refusal`]).
+//!
+//! I1 adds the studio's records: fact records that expire ([`fact`]), the brief ([`brief`]),
+//! the claim lint for free text ([`claims`]), the typed page tree and its validator
+//! ([`page_tree`]), and the named, path-carrying problems they report ([`problem`]).
 
+pub mod brief;
+pub mod claims;
+pub mod fact;
 pub mod ids;
 pub mod lead;
 pub mod limits;
 pub mod notification;
 pub mod outbox;
+pub mod page_tree;
+pub mod problem;
 pub mod ratelimit;
 pub mod refusal;
 pub mod retention;

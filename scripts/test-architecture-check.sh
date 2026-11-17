@@ -59,6 +59,7 @@ expect_fail domain-grouped-fs A1 "printf 'use std::{fs, io};\\npub fn f() {}\\n'
 expect_fail domain-grouped-multiline A1 "printf 'use std::{\\n    io,\\n    process::Command,\\n};\\n' >> crates/intent-domain/src/lib.rs"
 expect_fail domain-grouped-net A1 "printf 'use std::{net::{IpAddr, TcpStream}};\\n' >> crates/intent-domain/src/lib.rs"
 expect_fail domain-clock A1 "printf 'pub fn now() { let _ = std::time::SystemTime::now(); }\n' >> crates/intent-domain/src/lib.rs"
+expect_fail domain-calendar-clock A1 "printf 'pub fn today() -> time::Date { time::OffsetDateTime::now_utc().date() }\n' >> crates/intent-domain/src/lib.rs"
 expect_fail server-provider A2 "add_dep crates/intent-server/Cargo.toml 'async-openai = \"0.30\"'"
 expect_fail server-http-client A3 "add_dep crates/intent-server/Cargo.toml 'reqwest.workspace = true'"
 expect_fail review-publish A4 "printf 'intent-publish.workspace = true\n' >> crates/intent-review/Cargo.toml"

@@ -1,6 +1,6 @@
 [package]
 name = "intent-domain"
-description = "Intent Studio's pure domain: leads, submission keys, states, retry schedule and abuse limits. No I/O (scripts/check-architecture.sh enforces it)."
+description = "Intent Studio's pure domain: leads, submission keys, states, retry schedule and abuse limits; briefs, expiring fact records, the claim lint and the typed page tree. No I/O (scripts/check-architecture.sh enforces it)."
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -14,6 +14,10 @@ hex.workspace = true
 serde.workspace = true
 sha2.workspace = true
 thiserror.workspace = true
+# Calendar dates for fact approvals (no clock: the day is always a parameter).
+time.workspace = true
+# Parsing reference and link addresses (pure: idna and percent-encoding).
+url.workspace = true
 uuid.workspace = true
 
 [dev-dependencies]

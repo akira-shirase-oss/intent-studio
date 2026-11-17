@@ -379,7 +379,7 @@ fn optional(raw: Option<&str>, max: usize, multiline: bool) -> Result<Option<Str
 /// it is (a right-to-left override reverses what follows; zero-width characters make two
 /// different names look the same). The zero-width joiner is allowed in the message only, where
 /// emoji sequences use it.
-fn is_deceptive(c: char, allow_joiner: bool) -> bool {
+pub(crate) fn is_deceptive(c: char, allow_joiner: bool) -> bool {
     matches!(
         c,
         '\u{061C}'
@@ -416,7 +416,7 @@ fn notice_version(raw: Option<&str>) -> Result<Option<String>, FieldCode> {
 
 /// A shape check, not deliverability: one `@`, a non-empty local part of at most 64
 /// characters, and a dotted domain whose labels are non-empty and do not start or end with `-`.
-fn email(raw: Option<&str>) -> Result<Option<String>, FieldCode> {
+pub(crate) fn email(raw: Option<&str>) -> Result<Option<String>, FieldCode> {
     let Some(value) = optional(raw, EMAIL_MAX_CHARS, false)? else {
         return Ok(None);
     };
@@ -442,7 +442,7 @@ fn email(raw: Option<&str>) -> Result<Option<String>, FieldCode> {
 
 /// Digits with common formatting (`+` only first, spaces, `-`, `.`, parentheses); 6 to 15
 /// digits.
-fn phone(raw: Option<&str>) -> Result<Option<String>, FieldCode> {
+pub(crate) fn phone(raw: Option<&str>) -> Result<Option<String>, FieldCode> {
     let Some(value) = optional(raw, PHONE_MAX_CHARS, false)? else {
         return Ok(None);
     };

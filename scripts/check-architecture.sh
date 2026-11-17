@@ -2,7 +2,8 @@
 # The architecture rules from docs/ROADMAP.md §I0, enforced on every check.sh run and in CI:
 #
 #   A1  intent-domain has no I/O: no runtime, database, HTTP or filesystem crate among its
-#       dependencies (direct, renamed or transitive) and no I/O call in its source;
+#       dependencies (direct, renamed or transitive) and no I/O or clock call in its source
+#       (dates and times are parameters);
 #   A2  only intent-agent may depend on a model-provider client;
 #   A3  an HTTP client crate may appear only in intent-egress (client-named URLs, D-012),
 #       intent-agent (the model port) and intent-notify (the operator-configured notification
@@ -73,7 +74,7 @@ if [ -d "$domain" ]; then
     bad="$(deps_of "$domain" | grep -Ex "$io_crates" || true)"
     [ -z "$bad" ] || fail "A1 intent-domain depends on I/O crate(s): $(echo "$bad" | tr '\n' ' ')"
     [ ! -e "$domain/build.rs" ] || fail "A1 intent-domain must not have a build script"
-    calls="$(grep -rnE 'std::fs|std::process|std::env|TcpStream|TcpListener|UdpSocket|thread::sleep|SystemTime::now|Instant::now|File::(open|create)|tokio::' "$domain/src" || true)"
+    calls="$(grep -rnE 'std::fs|std::process|std::env|TcpStream|TcpListener|UdpSocket|thread::sleep|SystemTime::now|Instant::now|now_utc|now_local|File::(open|create)|tokio::' "$domain/src" || true)"
     [ -z "$calls" ] || fail "A1 intent-domain source performs I/O:"$'\n'"$calls"
     # Grouped imports (`use std::{fs, io};`, also across lines) name the module without the
     # `std::fs` spelling: join each file into one line and look inside every `std::{...}` group.

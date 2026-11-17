@@ -66,6 +66,23 @@ id_type!(
     OutboxId
 );
 
+id_type!(
+    /// One fact record (D-013): a claim a page may make.
+    FactId
+);
+id_type!(
+    /// One brief: what the client wants, with its revisions.
+    BriefId
+);
+id_type!(
+    /// One stored asset (an uploaded logo, photo or font) with its licence and provenance.
+    AssetId
+);
+id_type!(
+    /// One fetched snapshot of a reference page.
+    SnapshotId
+);
+
 #[cfg(test)]
 mod tests {
     use super::*;
