@@ -10,5 +10,5 @@ cd "$(dirname "$0")/.."
 
 scripts/stack.sh up
 cargo test --release --locked -p intent-server \
-    --test harness --test intake --test operator --test connections --test outbox_fencing --test notifier_pool --test readiness --test drill_notify_down --test drill_kill --test drill_db_down \
+    --no-fail-fast --test harness --test intake --test operator --test connections --test outbox_fencing --test notifier_pool --test readiness --test drill_notify_down --test drill_kill --test drill_db_down \
     -- --ignored
