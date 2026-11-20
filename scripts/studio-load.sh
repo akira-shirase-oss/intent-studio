@@ -14,16 +14,17 @@
 # result — machine, commit, `uptime` before and after, k6 metrics, the verdict — is written to
 # perf/results/ whether it passed or not (misses are kept, as with load.sh).
 #
-# Overrides: RATE, TOTAL, P99_READ_MS, P99_SPEC_MS, K6, KEEP_DB (keep the run's database
-# instead of dropping it), LOG_LEVEL.
+# Overrides: RATE, TOTAL, P99_READ_MS, P99_SPEC_MS, P999_READ_MS, P999_SPEC_MS (0: measured,
+# not gated — D-063 judges the tail on CI's dedicated run), K6, KEEP_DB (keep the run's
+# database instead of dropping it), LOG_LEVEL.
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
 scenario="${1:-}"
 case "$scenario" in
-    # The proposed thresholds of D-063, to be set from the quiet baseline.
-    baseline) : "${RATE:=200}" "${TOTAL:=12000}" "${P99_READ_MS:=50}" "${P99_SPEC_MS:=100}" ;;
-    full)     : "${RATE:?set RATE for the full run}" "${TOTAL:=1000000}" "${P99_READ_MS:=50}" "${P99_SPEC_MS:=100}" ;;
+    # The thresholds of D-063 (the addendum of 2026-11-20: the baseline's p99 × 4).
+    baseline) : "${RATE:=200}" "${TOTAL:=12000}" "${P99_READ_MS:=45}" "${P99_SPEC_MS:=45}" ;;
+    full)     : "${RATE:?set RATE for the full run}" "${TOTAL:=1000000}" "${P99_READ_MS:=45}" "${P99_SPEC_MS:=45}" ;;
     *) echo "usage: scripts/studio-load.sh baseline|full" >&2; exit 2 ;;
 esac
 : "${LOG_LEVEL:=debug,hyper=info,h2=info,sqlx=warn,reqwest=info}"
@@ -109,7 +110,7 @@ jq -n \
       uptime_before: $uptime_before, uptime_after: $uptime_after,
       note: "Development observation on a shared laptop, not production capacity. The load generator, the server and Postgres (Docker) share the machine.",
       config: { rate_per_s: $rate, total: $total,
-                p99_read_threshold_ms: $p99_read_ms, p99_spec_threshold_ms: $p99_spec_ms, budget: "D-063 proposed thresholds",
+                p99_read_threshold_ms: $p99_read_ms, p99_spec_threshold_ms: $p99_spec_ms, budget: "D-063 thresholds (baseline p99 x4)",
                 mix: "50% GET facts, 25% GET brief, 25% POST spec-check", profile: "production",
                 provider: "webhook configured, never called (the studio API notifies nothing)" },
       pass: ($pass == "yes"), k6_exit: $k6_status,

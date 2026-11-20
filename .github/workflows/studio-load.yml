@@ -1,0 +1,63 @@
+name: studio-load
+
+# The studio API's full load run (D-063): 1,000,000 requests through
+# scripts/studio-load.sh on a dedicated runner — the run whose p99/p99.9 the
+# thresholds are judged by, off the maintainer's laptop. Dispatch-only; a run
+# is never started by a push.
+
+on:
+  workflow_dispatch:
+    inputs:
+      rate:
+        description: 'Requests per second (the baseline ran at 200; below ~75 the run outlasts the 240-minute cap)'
+        required: true
+        default: '200'
+        type: string
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_BUILD_WARNINGS: deny
+
+concurrency:
+  # A load run is evidence and takes hours: queue the next dispatch, never
+  # cancel one mid-run.
+  group: studio-load
+  cancel-in-progress: false
+
+jobs:
+  full:
+    name: studio-load full (1,000,000 requests)
+    runs-on: ubuntu-latest
+    timeout-minutes: 240
+    steps:
+      # Third-party actions are pinned to commit SHAs.
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Install the pinned toolchain
+        run: |
+          channel=$(sed -n 's/^channel = "\(.*\)"$/\1/p' rust-toolchain.toml)
+          rustup toolchain install "$channel" --profile minimal
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+      - uses: grafana/setup-k6-action@c47136d33d365efbeb9ae7266908b5dcf98cdece # v1.3.0
+        with:
+          k6-version: '2.3.0'
+      # Linux hands outgoing connections ports from 32768 to 60999, which includes the
+      # 59400–59499 range the stack and the load server listen on. Keep outgoing ports below it.
+      - name: Keep outgoing ports below the stack's
+        run: sudo sysctl -w net.ipv4.ip_local_port_range="20000 50999"
+      - name: The full run
+        run: RATE="${{ inputs.rate }}" scripts/studio-load.sh full
+      # Result JSON plus the run's server log and k6 summary — kept whether the run
+      # passed or missed (a miss is evidence, not something to re-run until green).
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        if: always()
+        with:
+          name: studio-load-${{ github.run_id }}
+          path: |
+            perf/results/
+            perf/out/
+          retention-days: 30

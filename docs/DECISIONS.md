@@ -793,6 +793,19 @@ starting values; changing one needs a measurement and a new entry.
   shows candidates), and Chromium is the only engine tested (WebKit
   arrives with the promotion suite, D-022).
 
+  *Addendum 2026-11-20 — the thresholds are set.* The first baseline
+  (`perf/results/2026-11-20-studio-baseline-50070ec.json`: 12,000
+  requests at 200/s on an M2 Pro, load 5.6 falling from 31) measured
+  reads p99 10.5 ms and the spec check p99 10.4 ms, with p99.9 ~108 ms.
+  The gates are now p99 < 45 ms for both — four times the measurement,
+  a margin chosen for CI's shared runners, which run loopback
+  Rust+Postgres work roughly two to four times slower than a quiet
+  laptop and carry more noise; a run that misses four-times-baseline
+  has a real regression, not a slow runner. The p99.9 tail is recorded
+  in every result but not gated: 108 ms was observed on a loaded
+  laptop and gets judged on CI's dedicated `studio-load` run before it
+  earns its own number.
+
 - **D-064 — A tested production path.** The maintainer deploys this
   himself, so the way in is part of the product: `scripts/package.sh`
   builds a release package (both binaries, the built workspace, the

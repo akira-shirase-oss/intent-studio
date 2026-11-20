@@ -11,14 +11,16 @@
 //   PASSWORD     the operator password    (required)
 //   RATE         requests per second      (200)
 //   TOTAL        requests in the run      (RATE * 60; the full run is 1,000,000)
-//   P99_READ_MS  p99 budget for reads     (50)
-//   P99_SPEC_MS  p99 budget for the spec check (100)
+//   P99_READ_MS  p99 budget for reads     (45)
+//   P99_SPEC_MS  p99 budget for the spec check (45)
+//   P999_READ_MS p99.9 budget for reads   (0: measured, not gated)
+//   P999_SPEC_MS p99.9 budget for the spec check (0: measured, not gated)
 //   SUMMARY      where handleSummary writes the k6 summary JSON
 //
-// Thresholds (proposed, D-063: to be set from the first quiet baseline, as D-054 did for
-// intake): reads p99 < 50 ms, spec check p99 < 100 ms, zero failed requests, zero dropped
-// iterations above 0.01%. scripts/studio-load.sh runs this and records the result under
-// perf/results/.
+// Thresholds (D-063, set 2026-11-20 from the baseline in perf/results/): reads p99 < 45 ms,
+// spec check p99 < 45 ms, zero failed requests, zero dropped iterations above 0.01%; p99.9 is
+// recorded in every summary but gated only when a dedicated run sets its own number.
+// scripts/studio-load.sh runs this and records the result under perf/results/.
 
 import http from 'k6/http';
 import exec from 'k6/execution';
@@ -28,8 +30,10 @@ const BASE_URL = __ENV.BASE_URL || 'http://127.0.0.1:59406';
 const PASSWORD = __ENV.PASSWORD;
 const RATE = Number(__ENV.RATE || 200);
 const TOTAL = Number(__ENV.TOTAL || RATE * 60);
-const P99_READ_MS = Number(__ENV.P99_READ_MS || 50);
-const P99_SPEC_MS = Number(__ENV.P99_SPEC_MS || 100);
+const P99_READ_MS = Number(__ENV.P99_READ_MS || 45);
+const P99_SPEC_MS = Number(__ENV.P99_SPEC_MS || 45);
+const P999_READ_MS = Number(__ENV.P999_READ_MS || 0);
+const P999_SPEC_MS = Number(__ENV.P999_SPEC_MS || 0);
 const DURATION_S = Math.ceil(TOTAL / RATE);
 const MAX_DROPPED = Math.max(1, Math.floor(TOTAL * 0.0001));
 
@@ -48,8 +52,8 @@ export const options = {
 		}
 	},
 	thresholds: {
-		'http_req_duration{kind:read}': [`p(99)<${P99_READ_MS}`],
-		'http_req_duration{kind:spec}': [`p(99)<${P99_SPEC_MS}`],
+		'http_req_duration{kind:read}': [`p(99)<${P99_READ_MS}`, ...(P999_READ_MS > 0 ? [`p(99.9)<${P999_READ_MS}`] : [])],
+		'http_req_duration{kind:spec}': [`p(99)<${P99_SPEC_MS}`, ...(P999_SPEC_MS > 0 ? [`p(99.9)<${P999_SPEC_MS}`] : [])],
 		http_req_failed: ['rate==0'],
 		dropped_iterations: [`count<${MAX_DROPPED}`]
 	},
