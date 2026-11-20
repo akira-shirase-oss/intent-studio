@@ -232,4 +232,3 @@ mod tests {
         assert!(check_operator_password(&"x".repeat(MAX_PASSWORD_BYTES + 1)).is_err());
     }
 }
-

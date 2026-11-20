@@ -133,7 +133,10 @@ fn check_store_dir(dir: &std::path::Path) -> anyhow::Result<()> {
     std::fs::write(&marker, b"")
         .and_then(|()| std::fs::remove_file(&marker))
         .map_err(|e| {
-            anyhow::anyhow!("INTENT_STORE_DIR {}: not writable: {e}", probe_dir.display())
+            anyhow::anyhow!(
+                "INTENT_STORE_DIR {}: not writable: {e}",
+                probe_dir.display()
+            )
         })
 }
 
