@@ -275,7 +275,7 @@ async fn a_flood_of_bad_session_cookies_is_limited_and_leaves_intake_alone() {
     for n in 0..40_u32 {
         let response = client
             .get(&session)
-            .header("cookie", format!("intent_operator={n:064x}"))
+            .header("cookie", format!("__Host-intent_operator={n:064x}"))
             .header("x-forwarded-for", "10.80.0.1")
             .send()
             .await

@@ -281,6 +281,9 @@ pub fn drill_env(db: &TestDb, provider_url: &str) -> Vec<(String, String)> {
             "INTENT_LOG",
             "debug,sqlx=warn,hyper=info,h2=info,reqwest=info",
         ),
+        // Development: drills must opt in to the conveniences production refuses — an
+        // insecure session cookie over localhost — or the server never starts.
+        ("INTENT_PROFILE", "development"),
         ("INTENT_COOKIE_SECURE", "false"),
     ]
     .into_iter()
