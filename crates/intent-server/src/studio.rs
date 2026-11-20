@@ -50,6 +50,21 @@ fn ts(t: OffsetDateTime) -> Option<String> {
     t.format(&Rfc3339).ok()
 }
 
+/// The request's body is declared JSON.
+fn is_json(headers: &HeaderMap) -> bool {
+    headers
+        .get(header::CONTENT_TYPE)
+        .and_then(|v| v.to_str().ok())
+        .is_some_and(|v| v.starts_with("application/json"))
+}
+
+/// A write that takes no JSON body still needs the marker a cross-site form cannot send:
+/// `Content-Type: application/json` (the workspace's fetch sends it; a foreign form cannot
+/// set it without a CORS preflight that is never served) or the `x-intent` header.
+fn csrf_ok(headers: &HeaderMap) -> bool {
+    is_json(headers) || headers.contains_key("x-intent")
+}
+
 /// 401 first, then JSON only, then the capped body.
 async fn operator_json(
     app: &App,
@@ -59,11 +74,7 @@ async fn operator_json(
     cap: usize,
 ) -> Result<axum::body::Bytes, ApiError> {
     require_operator(app, peer, headers).await?;
-    let is_json = headers
-        .get(header::CONTENT_TYPE)
-        .and_then(|v| v.to_str().ok())
-        .is_some_and(|v| v.starts_with("application/json"));
-    if !is_json {
+    if !is_json(headers) {
         return Err(ApiError::UnsupportedMediaType);
     }
     read_body_capped(body, cap).await
@@ -282,6 +293,11 @@ pub async fn withdraw_fact(
     headers: HeaderMap,
 ) -> Result<Response, ApiError> {
     require_operator(&app, peer, &headers).await?;
+    // Withdrawal is permanent; a foreign form could reach this POST with the session cookie
+    // but cannot mark it as the workspace's fetch does.
+    if !csrf_ok(&headers) {
+        return Err(ApiError::UnsupportedMediaType);
+    }
     let tenant = tenant_id(&tenant)?;
     let fact: FactId = fact.parse().map_err(|_| ApiError::NotFound)?;
     let caller = Caller::of(&app, peer, &headers);

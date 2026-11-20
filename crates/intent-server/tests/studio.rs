@@ -490,6 +490,19 @@ async fn briefs_and_facts_round_trip_and_refuse_by_name() {
         )
     );
 
+    // A form-style POST — the CSRF shape: cookie attached, no JSON and no x-intent — is
+    // refused before it can withdraw anything.
+    let form = op
+        .client
+        .post(format!("{base}{tenant_path}/facts/{review_id}/withdrawal"))
+        .header("cookie", &op.cookie)
+        .header("content-type", "application/x-www-form-urlencoded")
+        .body("")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(form.status(), 415);
+
     // Withdrawing the testimonial makes the same tree fail with fact_withdrawn, and the fact
     // can no longer be approved.
     let (status, withdrawn) = op
