@@ -93,7 +93,7 @@ the env file stays root-only `0600`, readable only by systemd.
    sudo systemd-run --wait --pipe -q \
      -p EnvironmentFile=/etc/intent-studio/intent-studio.env \
      -p User=intent -p Group=intent \
-     -p StateDirectory=intent-studio \
+     -p StateDirectory=intent-studio -p StateDirectoryMode=0750 \
      /opt/intent-studio/bin/intent-server check-config
    ```
 
@@ -109,7 +109,7 @@ the env file stays root-only `0600`, readable only by systemd.
    sudo systemd-run --wait --pipe -q \
      -p EnvironmentFile=/etc/intent-studio/intent-studio.env \
      -p User=intent -p Group=intent \
-     -p StateDirectory=intent-studio \
+     -p StateDirectory=intent-studio -p StateDirectoryMode=0750 \
      /opt/intent-studio/bin/intent-server migrate
    sudo systemctl enable --now intent-studio
    journalctl -u intent-studio -n 20          # expect a "listening" line
