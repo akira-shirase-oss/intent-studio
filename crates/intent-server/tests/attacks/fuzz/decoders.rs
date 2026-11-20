@@ -58,12 +58,9 @@ proptest! {
     }
 
     #[test]
-    fn svg_never_panics_on_shaped_markup(inner in "[ -~]{0,200}") {
-        // KNOWN-RED finding (reported 2026-11-20, svg.rs is under re-review freeze): a
-        // non-ASCII character before `(` panics `value_is_safe` — it slices the value at a
-        // byte index inside the char; minimal input is `𒐀(`. The generator is ASCII-only
-        // until the re-review fix lands; then the strategy widens to any::<String>() and the
-        // reproducer joins the corpus.
+    fn svg_never_panics_on_shaped_markup(inner in any::<String>()) {
+        // The panic this generator found — `𒐀(` sliced mid-character — is fixed and its
+        // reproducer lives in corpus/svg/non-ascii-paren.svg and proptest-regressions/.
         let document = format!("<svg xmlns=\"http://www.w3.org/2000/svg\">{inner}</svg>");
         run(AssetKind::Svg, document.as_bytes());
         let styled = format!("<svg xmlns=\"http://www.w3.org/2000/svg\"><rect fill=\"{inner}\"/></svg>");
