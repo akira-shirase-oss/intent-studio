@@ -47,7 +47,10 @@ libc = "0.2"
 [dev-dependencies]
 # Test fixtures only (an image to upload); the server itself never links a decoder (A6).
 image.workspace = true
+# The attacks suite's fuzz targets drive the real decoder crate, never an in-server copy.
+intent-worker = { path = "../intent-worker" }
 intent-provider-fixture.workspace = true
+proptest = "1"
 reqwest.workspace = true
 sqlx.workspace = true
 

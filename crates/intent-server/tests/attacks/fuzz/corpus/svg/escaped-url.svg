@@ -1,0 +1,5 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="4" height="4">
+  <rect width="4" height="4" fill="\75rl(https://beacon.invalid/x)"/>
+  <rect width="4" height="4" fill="url( javascript:alert(1) )"/>
+  <rect width="4" height="4" fill="\75\72\6c(#g)"/>
+</svg>
