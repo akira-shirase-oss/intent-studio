@@ -154,6 +154,20 @@ fn sessions_db(config: &Config) -> anyhow::Result<Db> {
     .map_err(|e| anyhow::anyhow!("INTENT_DATABASE_URL: {}", e.summary()))
 }
 
+/// The known-address lookup's pool of one: sign-ins are already budgeted, so one connection
+/// serves them — and a cookie flood queuing on `sessions` cannot starve this pool too.
+fn known_db(config: &Config) -> anyhow::Result<Db> {
+    Db::connect_lazy(
+        config.database_url.expose(),
+        intent_db::PoolLimits {
+            max_connections: 1,
+            acquire_timeout: Duration::from_secs(1),
+            statement_timeout: Duration::from_secs(1),
+        },
+    )
+    .map_err(|e| anyhow::anyhow!("INTENT_DATABASE_URL: {}", e.summary()))
+}
+
 /// Runs the server until a signal, then drains.
 pub async fn run(config: Config) -> anyhow::Result<ShutdownOutcome> {
     let signal = os_signal().context("installing signal handlers")?;
@@ -175,6 +189,7 @@ pub async fn run(config: Config) -> anyhow::Result<ShutdownOutcome> {
         config.clone(),
         db.clone(),
         sessions_db(&config)?,
+        known_db(&config)?,
         health.clone(),
         studio,
     );

@@ -20,24 +20,26 @@ impl Db {
         .map_err(classify)
     }
 
-    /// Whether a session with this digest exists, has not expired and was used within `idle`;
-    /// a live session is touched in the same statement, so use keeps it alive.
-    pub async fn session_is_valid(
+    /// The expiry of the session with this digest if it exists, has not expired and was used
+    /// within `idle`; a live session is touched in the same statement, so use keeps it alive.
+    /// The caller needs `expires_at` to bound how long a check may be trusted without asking
+    /// again — trusting past it would keep a dead session warm.
+    pub async fn session_expiry(
         &self,
         digest: &[u8; 32],
         idle: Duration,
-    ) -> Result<bool, DbError> {
-        let touched = sqlx::query(
+    ) -> Result<Option<time::OffsetDateTime>, DbError> {
+        sqlx::query_scalar(
             "UPDATE operator_sessions SET last_seen_at = now()
              WHERE token_digest = $1 AND expires_at > now()
-               AND last_seen_at > now() - $2 * interval '1 second'",
+               AND last_seen_at > now() - $2 * interval '1 second'
+             RETURNING expires_at",
         )
         .bind(digest.as_slice())
         .bind(f64::from(u32::try_from(idle.as_secs()).unwrap_or(u32::MAX)))
-        .execute(&self.pool)
+        .fetch_optional(&self.pool)
         .await
-        .map_err(classify)?;
-        Ok(touched.rows_affected() == 1)
+        .map_err(classify)
     }
 
     /// Whether the operator signed in successfully from `address` within `within`.

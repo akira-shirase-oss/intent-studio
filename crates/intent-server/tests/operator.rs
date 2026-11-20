@@ -290,6 +290,50 @@ async fn a_flood_of_bad_session_cookies_is_limited_and_leaves_intake_alone() {
         "more session checks than the quota reached the database: {statuses:?}"
     );
 
+    // A known session is not drained with the bucket: the operator signs in first (the digest
+    // is marked at sign-in), the flood drains the address, the verified trust lapses, the
+    // flood re-drains the refill — and the operator's cookie still answers 200, re-checked
+    // for free. Without the known-digest path the last request is another 429.
+    let signed = sign_in(&client, &server.base, PASSWORD, "10.80.0.1", "req-known-1").await;
+    assert_eq!(signed.status(), 200);
+    let real = signed.headers()["set-cookie"]
+        .to_str()
+        .unwrap()
+        .split(';')
+        .next()
+        .unwrap()
+        .to_owned();
+    let valid = || {
+        client
+            .get(&session)
+            .header("cookie", &real)
+            .header("x-forwarded-for", "10.80.0.1")
+    };
+    // Inside the trust window the digest answers without even a charge.
+    assert_eq!(valid().send().await.unwrap().status(), 200);
+    tokio::time::sleep(std::time::Duration::from_secs(61)).await;
+    let mut drained = 0_u32;
+    for n in 0..25_u32 {
+        let status = client
+            .get(&session)
+            .header("cookie", format!("__Host-intent_operator={n:064x}"))
+            .header("x-forwarded-for", "10.80.0.1")
+            .send()
+            .await
+            .unwrap()
+            .status();
+        if status == 429 {
+            drained += 1;
+        }
+    }
+    assert!(drained > 0, "the re-flood never re-drained the bucket");
+    // Past the TTL, against a re-drained bucket: the known digest re-checks uncharged.
+    assert_eq!(
+        valid().send().await.unwrap().status(),
+        200,
+        "a known session was held at 429 by strangers on its address"
+    );
+
     // Intake never saw the flood: a lead still lands.
     let lead = client
         .post(format!(

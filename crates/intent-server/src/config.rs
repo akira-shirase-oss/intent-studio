@@ -534,6 +534,14 @@ impl Config {
         ));
         let session_idle =
             Duration::from_secs(env.ranged("INTENT_SESSION_IDLE_SECS", 30 * 60, 1..=24 * 3600));
+        // Two minutes is the production floor: a shorter idle makes session checks thrash
+        // the pool under any real use, and a verified-cache trust window of half the idle
+        // must stay long enough to answer a page's burst. Development keeps shorter values —
+        // the idle-expiry drill depends on one.
+        if session_idle < Duration::from_secs(120) && profile != Profile::Development {
+            env.problems
+                .push("INTENT_SESSION_IDLE_SECS: must be at least 120 outside development".into());
+        }
         let cookie_secure = env.parse("INTENT_COOKIE_SECURE", true);
         // An insecure operator cookie in production would ride every plaintext hop.
         if !cookie_secure && profile != Profile::Development {

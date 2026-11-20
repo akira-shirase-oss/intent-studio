@@ -50,6 +50,9 @@ pub struct Inner {
     pub db: Db,
     /// The session table's own small pool, so a flood of bad cookies cannot starve intake's.
     pub sessions: Db,
+    /// The known-address lookup's pool of one: a cookie flood on `sessions` must not make
+    /// sign-in 5xx, and intake's pool is not for it.
+    pub known_db: Db,
     /// Liveness and readiness.
     pub health: Health,
     /// Counters.
@@ -95,7 +98,14 @@ impl std::ops::Deref for App {
 
 impl App {
     /// Builds the state.
-    pub fn new(config: Config, db: Db, sessions: Db, health: Health, studio: Studio) -> Self {
+    pub fn new(
+        config: Config,
+        db: Db,
+        sessions: Db,
+        known_db: Db,
+        health: Health,
+        studio: Studio,
+    ) -> Self {
         Self(Arc::new(Inner {
             gate: Arc::new(Semaphore::new(config.max_in_flight)),
             address_limiter: Limiter::new(config.address_quota, config.rate_table_entries),
@@ -111,6 +121,7 @@ impl App {
             config,
             db,
             sessions,
+            known_db,
             health,
         }))
     }
