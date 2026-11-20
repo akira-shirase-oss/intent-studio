@@ -4,7 +4,7 @@
 use crate::support::{ProviderFixture, Server, TestDb, client, drill_env, server_binary};
 use intent_provider_fixture::Mode;
 
-const PASSWORD: &str = "operator test password 7";
+pub(crate) const PASSWORD: &str = "operator test password 7";
 
 /// A hash for `INTENT_OPERATOR_PASSWORD_HASH` (shared by the header attacks).
 pub(crate) fn hash() -> String {
