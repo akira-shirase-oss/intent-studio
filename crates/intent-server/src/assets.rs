@@ -57,6 +57,10 @@ fn store_error(error: &StoreError) -> ApiError {
             reason: "too_large",
         },
         StoreError::Corrupt => ApiError::Internal(anyhow::anyhow!("a stored blob is corrupt")),
+        // `Locked` comes only from `open` at startup — put/get never produce it.
+        StoreError::Locked => {
+            ApiError::Internal(anyhow::anyhow!("the store root is held by another store"))
+        }
         StoreError::Io(_) | StoreError::Timeout => {
             tracing::warn!(error = %error, "content store failed");
             ApiError::StoreUnavailable

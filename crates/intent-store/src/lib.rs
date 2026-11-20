@@ -17,6 +17,7 @@ use std::{
     fs, io,
     io::Write as _,
     path::{Path, PathBuf},
+    sync::Arc,
     time::Duration,
 };
 
@@ -40,6 +41,9 @@ pub enum StoreError {
     /// A stored blob no longer hashes to its name.
     #[error("stored blob does not match its hash")]
     Corrupt,
+    /// A live store already holds this root — a root is single-store.
+    #[error("store root is held by another live store")]
+    Locked,
     /// The filesystem refused (full, read-only, permissions, gone).
     #[error("store I/O failed")]
     Io(#[source] io::Error),
@@ -53,15 +57,32 @@ pub enum StoreError {
 pub struct ContentStore {
     root: PathBuf,
     max_blob: usize,
+    /// The root's exclusive lock, held so long as any clone of this store lives.
+    _lock: Arc<fs::File>,
 }
 
 impl ContentStore {
-    /// Opens (creating if needed) a store at `root`, sweeps crash orphans from `tmp/`, and
-    /// proves the store is writable by writing and removing a probe file. The sweep assumes
-    /// nothing else has this root open — a second live store would lose its in-flight writes.
+    /// Opens (creating if needed) a store at `root`, takes its exclusive lock, sweeps crash
+    /// orphans from `tmp/`, and proves the store is writable by writing and removing a probe
+    /// file. A root is single-store: the lock is held for the store's life and released by
+    /// the OS however the process ends, so a second `open` on a held root fails with
+    /// [`StoreError::Locked`] before it can touch the live holder's in-flight writes.
     /// Blocking: call at startup, not from a request.
     pub fn open(root: impl Into<PathBuf>, max_blob: usize) -> Result<Self, StoreError> {
         let root = root.into();
+        fs::create_dir_all(&root).map_err(StoreError::Io)?;
+        let lock = fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(true)
+            .truncate(false)
+            .open(root.join("lock"))
+            .map_err(StoreError::Io)?;
+        match lock.try_lock() {
+            Ok(()) => {}
+            Err(fs::TryLockError::WouldBlock) => return Err(StoreError::Locked),
+            Err(fs::TryLockError::Error(error)) => return Err(StoreError::Io(error)),
+        }
         fs::create_dir_all(root.join("sha256")).map_err(StoreError::Io)?;
         let tmp = root.join("tmp");
         fs::create_dir_all(&tmp).map_err(StoreError::Io)?;
@@ -79,7 +100,11 @@ impl ContentStore {
         let probe = tmp.join(format!("probe-{}", uuid::Uuid::new_v4().simple()));
         fs::write(&probe, b"probe").map_err(StoreError::Io)?;
         fs::remove_file(&probe).map_err(StoreError::Io)?;
-        Ok(Self { root, max_blob })
+        Ok(Self {
+            root,
+            max_blob,
+            _lock: Arc::new(lock),
+        })
     }
 
     /// The root directory.
@@ -222,6 +247,153 @@ mod tests {
     }
 
     #[test]
+    fn a_second_open_is_refused_and_sweeps_nothing() {
+        // A root is single-store: while one store lives, a second open of the
+        // same root must refuse before it touches anything — the debris below
+        // could be the live store's in-flight write.
+        let root = temp_root();
+        let _store = ContentStore::open(&root, 1024).unwrap();
+        fs::write(root.join("tmp").join("in-flight"), b"half written").unwrap();
+        assert!(matches!(
+            ContentStore::open(&root, 1024),
+            Err(StoreError::Locked)
+        ));
+        assert_eq!(
+            fs::read(root.join("tmp").join("in-flight")).unwrap(),
+            b"half written"
+        );
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn a_dropped_store_lets_the_root_open_again() {
+        // Closing the store releases the root; a later open sweeps as usual.
+        let root = temp_root();
+        let store = ContentStore::open(&root, 1024).unwrap();
+        drop(store);
+        fs::write(root.join("tmp").join("orphan"), b"debris").unwrap();
+        let _store = ContentStore::open(&root, 1024).unwrap();
+        assert_eq!(fs::read_dir(root.join("tmp")).unwrap().count(), 0);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn a_crashed_holder_releases_the_root() {
+        // Child mode: open the root (the lock is the process's), leave crash
+        // debris in tmp/, mark itself ready, then wait to be killed.
+        if let Ok(root) = std::env::var("INTENT_STORE_CRASH_CHILD") {
+            let _store = ContentStore::open(&root, 1024).unwrap();
+            fs::write(Path::new(&root).join("tmp").join("orphan"), b"debris").unwrap();
+            fs::write(Path::new(&root).join("ready"), b"").unwrap();
+            for _ in 0..600 {
+                std::thread::sleep(std::time::Duration::from_secs(1));
+            }
+            return;
+        }
+
+        let root = temp_root();
+        fs::create_dir_all(&root).unwrap();
+        let mut child = std::process::Command::new(std::env::current_exe().unwrap())
+            .env("INTENT_STORE_CRASH_CHILD", &root)
+            .args([
+                "--exact",
+                "tests::a_crashed_holder_releases_the_root",
+                "--nocapture",
+            ])
+            .spawn()
+            .unwrap();
+        for _ in 0..3000 {
+            if root.join("ready").exists() {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        // A live process holds the root: a second open is refused.
+        let second_open = ContentStore::open(&root, 1024);
+        child.kill().unwrap();
+        child.wait().unwrap();
+        assert!(root.join("ready").exists(), "child never took the lock");
+        assert!(matches!(second_open, Err(StoreError::Locked)));
+        // The crash released the lock: open succeeds and sweeps the debris.
+        let _store = ContentStore::open(&root, 1024).unwrap();
+        assert_eq!(fs::read_dir(root.join("tmp")).unwrap().count(), 0);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[tokio::test]
+    async fn arbitrary_bytes_round_trip_and_stay_idempotent() {
+        // Property: any byte string up to the cap stores, reads back whole,
+        // and storing it twice is the same single blob.
+        let root = temp_root();
+        let store = ContentStore::open(&root, 2048).unwrap();
+        let mut rng = fastrand::Rng::with_seed(0xCAFE_2026);
+        for _ in 0..64 {
+            let bytes: Vec<u8> = (0..rng.usize(0..=2048)).map(|_| rng.u8(..)).collect();
+            let hash = store.put(bytes.clone()).await.unwrap();
+            assert_eq!(store.get(hash).await.unwrap().unwrap(), bytes);
+            assert_eq!(store.put(bytes.clone()).await.unwrap(), hash);
+        }
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[tokio::test]
+    async fn different_bytes_live_under_different_names() {
+        // Property: distinct byte strings never share a name or hide each other.
+        let root = temp_root();
+        let store = ContentStore::open(&root, 2048).unwrap();
+        let mut rng = fastrand::Rng::with_seed(0xB10B);
+        for _ in 0..32 {
+            let a: Vec<u8> = (0..rng.usize(1..=512)).map(|_| rng.u8(..)).collect();
+            let b: Vec<u8> = (0..rng.usize(1..=512)).map(|_| rng.u8(..)).collect();
+            let (ha, hb) = (
+                store.put(a.clone()).await.unwrap(),
+                store.put(b.clone()).await.unwrap(),
+            );
+            assert_eq!(store.get(ha).await.unwrap().unwrap(), a);
+            assert_eq!(store.get(hb).await.unwrap().unwrap(), b);
+            if a != b {
+                assert_ne!(ha, hb);
+            }
+        }
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[tokio::test]
+    async fn an_impostor_under_a_key_is_rewritten_not_kept() {
+        // Property: whatever bytes squat under a hash's name — same length with
+        // a byte flipped, truncated, or padded — the read refuses them and
+        // re-storing the true bytes repairs the blob.
+        let root = temp_root();
+        let store = ContentStore::open(&root, 2048).unwrap();
+        let mut rng = fastrand::Rng::with_seed(0xFEED);
+        for _ in 0..32 {
+            let bytes: Vec<u8> = (0..rng.usize(1..=512)).map(|_| rng.u8(..)).collect();
+            let hash = store.put(bytes.clone()).await.unwrap();
+            let target = store.path_of(&hash);
+            match rng.u8(0..3) {
+                0 => {
+                    let mut impostor = bytes.clone();
+                    let i = rng.usize(..impostor.len());
+                    impostor[i] ^= 0xFF;
+                    fs::write(&target, &impostor).unwrap();
+                }
+                1 => {
+                    fs::write(&target, &bytes[..rng.usize(..bytes.len())]).unwrap();
+                }
+                _ => {
+                    let mut impostor = bytes.clone();
+                    impostor.extend_from_slice(&[0; 8]);
+                    fs::write(&target, &impostor).unwrap();
+                }
+            }
+            assert!(matches!(store.get(hash).await, Err(StoreError::Corrupt)));
+            assert_eq!(store.put(bytes.clone()).await.unwrap(), hash);
+            assert_eq!(store.get(hash).await.unwrap().unwrap(), bytes);
+        }
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
     fn a_store_that_cannot_be_written_does_not_open() {
         // A file where the root directory should be.
         let root = temp_root();
@@ -241,8 +413,10 @@ mod tests {
         fs::write(root.join("tmp").join("a1b2c3d4"), b"crashed write").unwrap();
         fs::create_dir_all(root.join("tmp").join("stray-dir")).unwrap();
         assert!(store.get(hash).await.unwrap().is_none());
-        // Re-opening after the crash sweeps tmp/ — nothing can be in flight at startup —
-        // and the interrupted write can be completed afresh.
+        // The "restart" ends the old holder first (a root is single-store): re-opening
+        // sweeps tmp/ — nothing can be in flight at startup — and the interrupted write
+        // can be completed afresh.
+        drop(store);
         let store = ContentStore::open(&root, 1024).unwrap();
         assert_eq!(fs::read_dir(root.join("tmp")).unwrap().count(), 0);
         assert_eq!(store.put(b"crashed write".to_vec()).await.unwrap(), hash);

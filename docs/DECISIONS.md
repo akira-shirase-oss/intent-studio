@@ -704,10 +704,7 @@ starting values; changing one needs a measurement and a new entry.
   `intent-store` keeps blobs at `<root>/sha256/ab/cd/<hex>`, written to
   `<root>/tmp/` under a fresh name, flushed, renamed into place and the
   directory flushed, so a crash leaves the whole blob or nothing under
-  its name, and `tmp/` debris is swept when the store opens — a second
-  live store must never share the root; storing the same bytes again is a
-  no-op only while the stored bytes still hash to their name — a
-  same-length torn file is rewritten, not trusted; every read re-hashes
+  its name; storing the same bytes again is a no-op; every read re-hashes
   and a mismatch is `Corrupt`, never served; at most 32 MiB a blob; every
   operation runs off the async workers under a 10 s deadline. The root is
   `INTENT_STORE_DIR`; a configured store that cannot be written stops
@@ -717,6 +714,16 @@ starting values; changing one needs a measurement and a new entry.
   harmless, unreferenced, and left for a later sweep. Cost: one disk until
   backups are copied off the host (D-016); the operator guide's backup
   covers the database and this directory together.
+
+  *Addendum 2026-11-20:* a root is single-store, enforced not assumed.
+  `open` takes an exclusive advisory lock on `<root>/lock`, held for the
+  store's life and released by the OS however the process ends — a second
+  open on a held root is refused `Locked` before it can touch anything,
+  because its `tmp/` sweep would otherwise eat the live holder's
+  in-flight writes. `open` then sweeps `tmp/`: at startup nothing can be
+  in flight. And "storing the same bytes again is a no-op" holds only
+  while the stored bytes still hash to their name — a same-length torn
+  file is rewritten, never trusted by its length.
 
 - **D-062 — The asset worker: one process per file, now; the container
   at deployment.** D-011 puts untrusted decoding in a rootless container.
