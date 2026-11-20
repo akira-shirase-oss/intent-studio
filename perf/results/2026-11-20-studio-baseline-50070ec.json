@@ -1,0 +1,86 @@
+{
+  "scenario": "studio-baseline",
+  "run": "studio-baseline-20261120T121825Z",
+  "started": "2026-11-20T12:19:04Z",
+  "commit": "50070ec05dc83483b29f9156b1efc6e81971ab41",
+  "machine": "Apple M2 Pro, 12 cores, 32 GiB, macOS 27.2.1",
+  "uptime_before": " 7:19  up 3 days, 17:46, 2 users, load averages: 5.62 18.49 31.52",
+  "uptime_after": " 7:20  up 3 days, 17:47, 2 users, load averages: 4.48 15.88 29.66",
+  "note": "Development observation on a shared laptop, not production capacity. The load generator, the server and Postgres (Docker) share the machine.",
+  "config": {
+    "rate_per_s": 200,
+    "total": 12000,
+    "p99_read_threshold_ms": 50,
+    "p99_spec_threshold_ms": 100,
+    "budget": "D-063 proposed thresholds",
+    "mix": "50% GET facts, 25% GET brief, 25% POST spec-check",
+    "profile": "production",
+    "provider": "webhook configured, never called (the studio API notifies nothing)"
+  },
+  "pass": true,
+  "k6_exit": 0,
+  "k6": {
+    "iterations": 12000,
+    "achieved_rate_per_s": 199.48574237995635,
+    "dropped_iterations": 0,
+    "read_ms": {
+      "max": 155.301,
+      "min": 1.52,
+      "med": 3.347,
+      "avg": 3.827816444444458,
+      "p(90)": 4.9752,
+      "p(95)": 5.674299999999998,
+      "p(99)": 10.52915,
+      "p(99.9)": 108.03957300000155
+    },
+    "spec_ms": {
+      "p(90)": 5.214200000000001,
+      "p(95)": 5.898749999999998,
+      "p(99)": 10.410079999999997,
+      "p(99.9)": 95.48811600000963,
+      "max": 162.851,
+      "min": 2.005,
+      "med": 3.7645,
+      "avg": 4.206563333333336
+    },
+    "all_ms": {
+      "max": 162.851,
+      "min": 1.52,
+      "med": 3.46,
+      "avg": 3.9207538819231074,
+      "p(90)": 5.021400000000001,
+      "p(95)": 5.750499999999998,
+      "p(99)": 10.523959999999999,
+      "p(99.9)": 107.63190200001281
+    },
+    "failed_rate": 0,
+    "thresholds": {
+      "http_req_duration{kind:spec}": {
+        "p(99)<100": {
+          "ok": true
+        }
+      },
+      "http_req_duration{kind:read}": {
+        "p(99)<50": {
+          "ok": true
+        }
+      },
+      "http_req_failed": {
+        "rate==0": {
+          "ok": true
+        }
+      },
+      "dropped_iterations": {
+        "count<1": {
+          "ok": true
+        }
+      }
+    }
+  },
+  "log_lines_with_content_or_secrets": 0,
+  "log": {
+    "level": "debug,hyper=info,h2=info,sqlx=warn,reqwest=info",
+    "lines_scanned": 24095
+  },
+  "database": "intent_studio_20261120t121825z"
+}
