@@ -704,7 +704,10 @@ starting values; changing one needs a measurement and a new entry.
   `intent-store` keeps blobs at `<root>/sha256/ab/cd/<hex>`, written to
   `<root>/tmp/` under a fresh name, flushed, renamed into place and the
   directory flushed, so a crash leaves the whole blob or nothing under
-  its name; storing the same bytes again is a no-op; every read re-hashes
+  its name, and `tmp/` debris is swept when the store opens — a second
+  live store must never share the root; storing the same bytes again is a
+  no-op only while the stored bytes still hash to their name — a
+  same-length torn file is rewritten, not trusted; every read re-hashes
   and a mismatch is `Corrupt`, never served; at most 32 MiB a blob; every
   operation runs off the async workers under a 10 s deadline. The root is
   `INTENT_STORE_DIR`; a configured store that cannot be written stops

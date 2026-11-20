@@ -56,15 +56,27 @@ pub struct ContentStore {
 }
 
 impl ContentStore {
-    /// Opens (creating if needed) a store at `root`, and proves it is writable by writing and
-    /// removing a probe file. Blocking: call at startup, not from a request.
+    /// Opens (creating if needed) a store at `root`, sweeps crash orphans from `tmp/`, and
+    /// proves the store is writable by writing and removing a probe file. The sweep assumes
+    /// nothing else has this root open — a second live store would lose its in-flight writes.
+    /// Blocking: call at startup, not from a request.
     pub fn open(root: impl Into<PathBuf>, max_blob: usize) -> Result<Self, StoreError> {
         let root = root.into();
         fs::create_dir_all(root.join("sha256")).map_err(StoreError::Io)?;
-        fs::create_dir_all(root.join("tmp")).map_err(StoreError::Io)?;
-        let probe = root
-            .join("tmp")
-            .join(format!("probe-{}", uuid::Uuid::new_v4().simple()));
+        let tmp = root.join("tmp");
+        fs::create_dir_all(&tmp).map_err(StoreError::Io)?;
+        // tmp/ holds only in-flight writes, and at startup nothing is in flight: whatever
+        // is here is a crash's orphan, swept before the store serves (D-061).
+        for entry in fs::read_dir(&tmp).map_err(StoreError::Io)? {
+            let entry = entry.map_err(StoreError::Io)?;
+            let path = entry.path();
+            if path.is_dir() {
+                fs::remove_dir_all(&path).map_err(StoreError::Io)?;
+            } else {
+                fs::remove_file(&path).map_err(StoreError::Io)?;
+            }
+        }
+        let probe = tmp.join(format!("probe-{}", uuid::Uuid::new_v4().simple()));
         fs::write(&probe, b"probe").map_err(StoreError::Io)?;
         fs::remove_file(&probe).map_err(StoreError::Io)?;
         Ok(Self { root, max_blob })
@@ -97,8 +109,12 @@ impl ContentStore {
     fn put_blocking(&self, bytes: &[u8]) -> Result<ContentHash, StoreError> {
         let hash = ContentHash::of(bytes);
         let target = self.path_of(&hash);
+        // The idempotent-write fast path skips the write only while the stored bytes still
+        // verify: a torn or damaged file with the same length is rewritten below, never
+        // trusted by its name and length.
         if let Ok(meta) = fs::metadata(&target)
             && meta.len() == bytes.len() as u64
+            && fs::read(&target).is_ok_and(|stored| ContentHash::of(&stored) == hash)
         {
             return Ok(hash);
         }
@@ -212,5 +228,57 @@ mod tests {
         fs::write(&root, b"not a directory").unwrap();
         assert!(ContentStore::open(&root, 8).is_err());
         fs::remove_file(root).unwrap();
+    }
+
+    #[tokio::test]
+    async fn a_crash_orphan_in_tmp_is_never_served_and_is_swept_on_open() {
+        // A crash between the flush and the rename leaves a complete write under tmp/,
+        // plus whatever other debris. It is not a blob: its name under sha256/ was never
+        // made, so a read of its hash finds nothing.
+        let root = temp_root();
+        let store = ContentStore::open(&root, 1024).unwrap();
+        let hash = ContentHash::of(b"crashed write");
+        fs::write(root.join("tmp").join("a1b2c3d4"), b"crashed write").unwrap();
+        fs::create_dir_all(root.join("tmp").join("stray-dir")).unwrap();
+        assert!(store.get(hash).await.unwrap().is_none());
+        // Re-opening after the crash sweeps tmp/ — nothing can be in flight at startup —
+        // and the interrupted write can be completed afresh.
+        let store = ContentStore::open(&root, 1024).unwrap();
+        assert_eq!(fs::read_dir(root.join("tmp")).unwrap().count(), 0);
+        assert_eq!(store.put(b"crashed write".to_vec()).await.unwrap(), hash);
+        assert_eq!(store.get(hash).await.unwrap().unwrap(), b"crashed write");
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[tokio::test]
+    async fn a_torn_blob_is_corrupt_on_read_and_repaired_by_put() {
+        // Disk damage or a torn write that kept the length: the name claims the hash
+        // but the bytes are not it. The read refuses it, and re-storing the right
+        // bytes repairs the blob — a same-length file must not skip the write.
+        let root = temp_root();
+        let store = ContentStore::open(&root, 1024).unwrap();
+        let bytes = b"a payload to tear";
+        let hash = store.put(bytes.to_vec()).await.unwrap();
+        let mut torn = bytes.to_vec();
+        torn[0] = b'X';
+        fs::write(store.path_of(&hash), &torn).unwrap();
+        assert!(matches!(store.get(hash).await, Err(StoreError::Corrupt)));
+        assert_eq!(store.put(bytes.to_vec()).await.unwrap(), hash);
+        assert_eq!(store.get(hash).await.unwrap().unwrap(), bytes);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[tokio::test]
+    async fn a_shortened_blob_is_corrupt_and_repaired_too() {
+        // Truncated debris is also refused on read and healed by re-storing.
+        let root = temp_root();
+        let store = ContentStore::open(&root, 1024).unwrap();
+        let bytes = b"longer than this";
+        let hash = store.put(bytes.to_vec()).await.unwrap();
+        fs::write(store.path_of(&hash), b"short").unwrap();
+        assert!(matches!(store.get(hash).await, Err(StoreError::Corrupt)));
+        assert_eq!(store.put(bytes.to_vec()).await.unwrap(), hash);
+        assert_eq!(store.get(hash).await.unwrap().unwrap(), bytes);
+        fs::remove_dir_all(root).unwrap();
     }
 }
