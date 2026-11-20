@@ -37,6 +37,7 @@ tower.workspace = true
 tower-http = { workspace = true, features = ["set-header"] }
 tracing.workspace = true
 tracing-subscriber.workspace = true
+url.workspace = true
 uuid = { workspace = true, features = ["v4", "v7"] }
 
 # PR_SET_DUMPABLE is Linux-only.

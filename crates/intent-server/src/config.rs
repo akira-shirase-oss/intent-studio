@@ -272,6 +272,23 @@ fn unreachable_quota() -> Quota {
     Quota::per_minute(1).unwrap_or_else(|| unreachable!("invariant: 1 is a valid quota"))
 }
 
+/// A plain-HTTP target that never leaves this host's trust boundary: loopback or a private
+/// address (including `localhost`), so a same-box provider relay stays deployable. A remote
+/// name or public address is not local.
+fn http_target_is_local(url: &url::Url) -> bool {
+    match url.host() {
+        Some(url::Host::Domain(name)) => name.eq_ignore_ascii_case("localhost"),
+        Some(url::Host::Ipv4(v4)) => v4.is_loopback() || v4.is_private(),
+        Some(url::Host::Ipv6(v6)) => {
+            let first = v6.segments()[0];
+            v6.is_loopback()
+                || (first & 0xfe00) == 0xfc00 // unique local fc00::/7
+                || (first & 0xffc0) == 0xfe80 // link-local fe80::/10
+        }
+        None => false,
+    }
+}
+
 impl Config {
     /// Reads the configuration through `lookup` (the process environment in production, a map
     /// in tests).
@@ -398,6 +415,24 @@ impl Config {
         let provider = match env.raw("INTENT_NOTIFY_PROVIDER").as_deref().map(str::trim) {
             Some("webhook") => {
                 if let Some(url) = env.raw("INTENT_NOTIFY_WEBHOOK_URL") {
+                    // Plain HTTP past this host is a plaintext path to wherever the URL
+                    // points: in production it is refused unless the target is loopback or
+                    // a private address (a remote provider sits behind a local relay).
+                    match url::Url::parse(&url) {
+                        Err(_) => env
+                            .problems
+                            .push("INTENT_NOTIFY_WEBHOOK_URL: not a URL".into()),
+                        Ok(parsed)
+                            if profile != Profile::Development
+                                && parsed.scheme() == "http"
+                                && !http_target_is_local(&parsed) =>
+                        {
+                            env.problems.push(
+                                "INTENT_NOTIFY_WEBHOOK_URL: plain HTTP in production must target loopback or a private address (put a remote provider behind a local relay)".into(),
+                            );
+                        }
+                        _ => {}
+                    }
                     ProviderConfig::Webhook { url }
                 } else {
                     env.problems.push(
@@ -500,6 +535,12 @@ impl Config {
         let session_idle =
             Duration::from_secs(env.ranged("INTENT_SESSION_IDLE_SECS", 30 * 60, 1..=24 * 3600));
         let cookie_secure = env.parse("INTENT_COOKIE_SECURE", true);
+        // An insecure operator cookie in production would ride every plaintext hop.
+        if !cookie_secure && profile != Profile::Development {
+            env.problems.push(
+                "INTENT_COOKIE_SECURE=false sends the operator cookie unencrypted and is for development only (set INTENT_PROFILE=development)".into(),
+            );
+        }
         let workspace_dir = env.raw("INTENT_WORKSPACE_DIR").map(PathBuf::from);
         let studio = StudioConfig {
             store_dir: env
@@ -752,6 +793,62 @@ mod tests {
         let text = config(&pairs).unwrap_err().to_string();
         assert!(text.contains("INTENT_NOTIFY_WEBHOOK_URL"));
         assert!(text.contains("INTENT_NOTIFY_LEASE_MS must be longer"));
+    }
+
+    #[test]
+    fn production_refuses_an_insecure_cookie_and_a_remote_http_webhook() {
+        let db = (
+            "INTENT_DATABASE_URL",
+            "postgres://u:p@127.0.0.1:59432/intent",
+        );
+        let webhook = ("INTENT_NOTIFY_PROVIDER", "webhook");
+        // No INTENT_PROFILE pair: production is the default.
+        let text = config(&[
+            db,
+            webhook,
+            ("INTENT_NOTIFY_WEBHOOK_URL", "http://203.0.113.10:8080/hook"),
+            ("INTENT_COOKIE_SECURE", "false"),
+        ])
+        .unwrap_err()
+        .to_string();
+        assert!(text.contains("INTENT_COOKIE_SECURE"), "{text}");
+        assert!(text.contains("INTENT_NOTIFY_WEBHOOK_URL"), "{text}");
+
+        // Development accepts both (the remote HTTP URL parses fine).
+        let dev = config(&[
+            db,
+            webhook,
+            ("INTENT_PROFILE", "development"),
+            ("INTENT_NOTIFY_WEBHOOK_URL", "http://203.0.113.10:8080/hook"),
+            ("INTENT_COOKIE_SECURE", "false"),
+        ])
+        .unwrap();
+        assert!(!dev.cookie_secure);
+
+        // In production, loopback and private targets stay plain-HTTP-deployable.
+        for url in [
+            "http://127.0.0.1:59480/v1/notify",
+            "http://[::1]:59480/v1/notify",
+            "http://localhost:59480/v1/notify",
+            "http://10.9.9.9/hook",
+            "http://192.168.4.4/hook",
+            "http://172.16.0.9/hook",
+            "http://[fd00::1]/hook",
+        ] {
+            config(&[db, webhook, ("INTENT_NOTIFY_WEBHOOK_URL", url)])
+                .unwrap_or_else(|e| panic!("{url}: {e}"));
+        }
+        // A public name or address is refused; so is a string that is no URL at all.
+        for url in [
+            "http://hooks.example.com/hook",
+            "http://8.8.8.8/hook",
+            "not a url",
+        ] {
+            let text = config(&[db, webhook, ("INTENT_NOTIFY_WEBHOOK_URL", url)])
+                .unwrap_err()
+                .to_string();
+            assert!(text.contains("INTENT_NOTIFY_WEBHOOK_URL"), "{url}: {text}");
+        }
     }
 
     #[test]
