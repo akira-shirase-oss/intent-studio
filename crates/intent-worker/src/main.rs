@@ -21,153 +21,53 @@ const CPU_SECONDS: u64 = 10;
 #[cfg(target_os = "linux")]
 const ADDRESS_SPACE_BYTES: u64 = 1024 * 1024 * 1024;
 
-/// Syscalls a job never needs, denied on Linux (D-011). The list denies rather than
-/// allow-lists: a name missed here still runs, but everything that could read a file, open a
-/// socket, start another process or leave a namespace is named. The legacy open/stat/fork
-/// family exists only on some architectures, so the list is built, not literal.
+/// The syscalls a job needs, allowed on Linux (D-011). An allow-list rather than a deny
+/// list: every number not named here — sockets, file opens by name, exec, new processes,
+/// namespaces, xattrs, rlimit/priority changes, fcntl signal ownership, pidfd, io_uring —
+/// answers EPERM. x32 needs no separate check: an x32 call carries a number with the x32
+/// bit set, and no such number is on this list, so the default refusal takes it.
 #[cfg(target_os = "linux")]
-fn denied_syscalls() -> Vec<i64> {
-    let mut denied = vec![
-        // A socket, and everything done on one. The job's only channels are the pipes it was
-        // started with, so no address family may be opened — loopback and the database are as
-        // unreachable as the internet.
-        libc::SYS_socket,
-        libc::SYS_socketpair,
-        libc::SYS_bind,
-        libc::SYS_connect,
-        libc::SYS_listen,
-        libc::SYS_accept,
-        libc::SYS_accept4,
-        libc::SYS_sendto,
-        libc::SYS_sendmsg,
-        libc::SYS_sendmmsg,
-        libc::SYS_recvfrom,
-        libc::SYS_recvmsg,
-        libc::SYS_recvmmsg,
-        libc::SYS_shutdown,
-        libc::SYS_getsockopt,
-        libc::SYS_setsockopt,
-        libc::SYS_getpeername,
-        libc::SYS_getsockname,
-        // Opening or making a file by name. Without these, neither the server's
-        // /proc/<pid>/environ nor the store nor anything else on the filesystem can be read,
-        // written, renamed or removed — the path-based ops below do not need open() to hurt.
-        libc::SYS_openat,
-        libc::SYS_openat2,
-        libc::SYS_open_by_handle_at,
-        libc::SYS_name_to_handle_at,
-        libc::SYS_newfstatat,
-        libc::SYS_statx,
-        libc::SYS_faccessat,
-        libc::SYS_faccessat2,
-        libc::SYS_readlinkat,
-        libc::SYS_statfs,
-        libc::SYS_unlinkat,
-        libc::SYS_mkdirat,
-        libc::SYS_renameat,
-        libc::SYS_renameat2,
-        libc::SYS_linkat,
-        libc::SYS_symlinkat,
-        libc::SYS_mknodat,
-        libc::SYS_fchmodat,
-        libc::SYS_fchownat,
-        libc::SYS_utimensat,
-        libc::SYS_futimesat,
-        libc::SYS_setxattr,
-        libc::SYS_lsetxattr,
-        libc::SYS_getxattr,
-        libc::SYS_lgetxattr,
-        libc::SYS_listxattr,
-        libc::SYS_llistxattr,
-        libc::SYS_removexattr,
-        libc::SYS_lremovexattr,
-        // Watching the filesystem without opening it (existence and timing by side channel).
-        libc::SYS_inotify_init1,
-        libc::SYS_inotify_add_watch,
-        libc::SYS_inotify_rm_watch,
-        libc::SYS_fanotify_init,
-        libc::SYS_fanotify_mark,
-        // Running another program (the filter would follow it, but there is nothing to run).
-        libc::SYS_execve,
-        libc::SYS_execveat,
-        // New processes and namespaces: a forked child would outlive the driver's kill of the
-        // job's own process.
-        libc::SYS_clone,
-        libc::SYS_clone3,
-        libc::SYS_unshare,
-        libc::SYS_setns,
-        // Signalling other processes (the job's parent is the server).
-        libc::SYS_kill,
-        libc::SYS_tkill,
-        libc::SYS_tgkill,
-        libc::SYS_pidfd_send_signal,
-        libc::SYS_rt_sigqueueinfo,
-        libc::SYS_rt_tgsigqueueinfo,
-        // Mounts and roots.
-        libc::SYS_mount,
-        libc::SYS_umount2,
-        libc::SYS_pivot_root,
-        libc::SYS_chroot,
-        libc::SYS_fsopen,
-        libc::SYS_fsmount,
-        libc::SYS_fsconfig,
-        libc::SYS_move_mount,
-        libc::SYS_open_tree,
-        // Reading other processes and kernel objects.
-        libc::SYS_ptrace,
-        libc::SYS_process_vm_readv,
-        libc::SYS_process_vm_writev,
-        libc::SYS_kcmp,
-        libc::SYS_bpf,
-        libc::SYS_perf_event_open,
-        libc::SYS_userfaultfd,
-        libc::SYS_memfd_create,
-        libc::SYS_add_key,
-        libc::SYS_keyctl,
-        libc::SYS_request_key,
-        libc::SYS_init_module,
-        libc::SYS_finit_module,
-        libc::SYS_delete_module,
-        // io_uring runs work on kernel threads: a documented shape for walking past a syscall
-        // filter on old kernels.
-        libc::SYS_io_uring_setup,
-        libc::SYS_io_uring_enter,
-        libc::SYS_io_uring_register,
-    ];
-    // The pre-openat file syscalls and the old fork pair exist on x86_64 but not on the
-    // generic-ABI architectures (aarch64, riscv64); deny them where the kernel knows them.
-    #[cfg(target_arch = "x86_64")]
-    denied.extend([
-        libc::SYS_open,
-        libc::SYS_creat,
-        libc::SYS_stat,
-        libc::SYS_lstat,
-        libc::SYS_access,
-        libc::SYS_readlink,
-        libc::SYS_truncate,
-        libc::SYS_unlink,
-        libc::SYS_rmdir,
-        libc::SYS_mkdir,
-        libc::SYS_rename,
-        libc::SYS_link,
-        libc::SYS_symlink,
-        libc::SYS_mknod,
-        libc::SYS_chmod,
-        libc::SYS_chown,
-        libc::SYS_lchown,
-        libc::SYS_utime,
-        libc::SYS_utimes,
-        libc::SYS_fork,
-        libc::SYS_vfork,
-        libc::SYS_inotify_init,
-    ]);
-    // libc's SYS_* constants are c_long; the filter's keys are i64.
-    denied.into_iter().map(i64::from).collect()
+fn allowed_syscalls() -> Vec<i64> {
+    let allowed: Vec<i64> = [
+        // The job's whole I/O: read the job on stdin, write the framed answer on stdout.
+        libc::SYS_read,
+        libc::SYS_readv,
+        libc::SYS_write,
+        libc::SYS_writev,
+        libc::SYS_close,
+        // Heap and stack management, by the allocator and the runtime only.
+        libc::SYS_brk,
+        libc::SYS_mmap,
+        libc::SYS_munmap,
+        libc::SYS_mremap,
+        libc::SYS_madvise,
+        // Parking and waking between threads the runtime started before confinement.
+        libc::SYS_futex,
+        libc::SYS_rt_sigaction,
+        libc::SYS_rt_sigprocmask,
+        libc::SYS_rt_sigreturn,
+        libc::SYS_sigaltstack,
+        // Randomness, time, a sleep, a yield, and the two ways out.
+        libc::SYS_getrandom,
+        libc::SYS_clock_gettime,
+        libc::SYS_nanosleep,
+        libc::SYS_clock_nanosleep,
+        libc::SYS_sched_yield,
+        libc::SYS_getpid,
+        libc::SYS_restart_syscall,
+        libc::SYS_exit,
+        libc::SYS_exit_group,
+    ]
+    .into_iter()
+    .map(i64::from)
+    .collect();
+    allowed
 }
 
-/// The syscall filter, installed before a byte of input is read. EPERM answers a denied call
-/// rather than a kill, so a legitimate library path that tries one fails visibly instead of
-/// crashing mid-job; the filter survives exec (itself denied), so there is no stepping out.
+/// The syscall filter, installed before a byte of input is read. Only the named calls get
+/// Allow; everything else — matched or unmatched — answers EPERM rather than a kill, so a
+/// legitimate library path that tries one fails visibly instead of crashing mid-job. The
+/// filter survives exec (itself refused), so there is no stepping out.
 #[cfg(target_os = "linux")]
 fn confine_syscalls() -> std::io::Result<()> {
     use seccompiler::{SeccompAction, SeccompFilter, TargetArch};
@@ -177,16 +77,17 @@ fn confine_syscalls() -> std::io::Result<()> {
     if unsafe { libc::prctl(libc::PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0) } != 0 {
         return Err(std::io::Error::last_os_error());
     }
-    let rules: std::collections::BTreeMap<i64, Vec<seccompiler::SeccompRule>> = denied_syscalls()
+    let rules: std::collections::BTreeMap<i64, Vec<seccompiler::SeccompRule>> = allowed_syscalls()
         .into_iter()
         .map(|call| (call, Vec::new()))
         .collect();
     let arch = TargetArch::try_from(std::env::consts::ARCH).map_err(|_| failed())?;
     let eperm = u32::try_from(libc::EPERM).map_err(|_| failed())?;
+    // Rules hit Allow; any other number — sockets, opens, exec, the x32 bit set — hits Errno.
     let filter = SeccompFilter::new(
         rules,
-        SeccompAction::Allow,
         SeccompAction::Errno(eperm),
+        SeccompAction::Allow,
         arch,
     )
     .map_err(|_| failed())?;
@@ -276,51 +177,118 @@ fn main() -> ExitCode {
 
 #[cfg(all(test, target_os = "linux"))]
 mod tests {
-    use super::denied_syscalls;
+    use super::{allowed_syscalls, confine};
+
+    /// Marker env var: the confined child re-runs exactly this test with it set, and the test
+    /// body is then the probe — apply the filter, try the two calls, print the verdicts, exit.
+    const CHILD_FLAG: &str = "INTENT_WORKER_CONFINED_CHILD";
 
     #[test]
-    fn the_filter_denies_every_escape_a_job_has() {
-        let denied = denied_syscalls();
-        // The review's named surfaces, each present exactly once: the network, the filesystem
-        // by name, other programs, other processes, the kernel's own doors and io_uring.
+    fn the_allowed_list_is_exactly_what_a_job_needs() {
+        let allowed = allowed_syscalls();
+        for call in [
+            libc::SYS_read,
+            libc::SYS_write,
+            libc::SYS_close,
+            libc::SYS_brk,
+            libc::SYS_mmap,
+            libc::SYS_munmap,
+            libc::SYS_mremap,
+            libc::SYS_madvise,
+            libc::SYS_futex,
+            libc::SYS_rt_sigaction,
+            libc::SYS_rt_sigprocmask,
+            libc::SYS_rt_sigreturn,
+            libc::SYS_sigaltstack,
+            libc::SYS_getrandom,
+            libc::SYS_clock_gettime,
+            libc::SYS_exit_group,
+        ] {
+            assert!(
+                allowed.contains(&i64::from(call)),
+                "syscall {call} a job needs is not allowed"
+            );
+        }
+        // The review's named escapes must not be on the list.
         for call in [
             libc::SYS_socket,
-            libc::SYS_connect,
-            libc::SYS_accept4,
             libc::SYS_openat,
-            libc::SYS_openat2,
-            libc::SYS_newfstatat,
-            libc::SYS_unlinkat,
-            libc::SYS_renameat,
-            libc::SYS_statfs,
-            libc::SYS_inotify_add_watch,
-            libc::SYS_execve,
-            libc::SYS_clone,
-            libc::SYS_clone3,
-            libc::SYS_unshare,
-            libc::SYS_setns,
-            libc::SYS_kill,
-            libc::SYS_mount,
-            libc::SYS_chroot,
-            libc::SYS_ptrace,
-            libc::SYS_process_vm_readv,
-            libc::SYS_perf_event_open,
-            libc::SYS_memfd_create,
+            libc::SYS_prlimit64,
+            libc::SYS_setpriority,
+            libc::SYS_fchmodat2,
+            libc::SYS_pidfd_getfd,
             libc::SYS_io_uring_setup,
+            libc::SYS_clone3,
         ] {
-            assert_eq!(
-                denied.iter().filter(|&&d| d == call).count(),
-                1,
-                "syscall {call} is missing or duplicated"
+            assert!(
+                !allowed.contains(&i64::from(call)),
+                "escape syscall {call} must not be allowed"
             );
         }
         assert_eq!(
-            denied.len(),
-            denied
+            allowed.len(),
+            allowed
                 .iter()
                 .collect::<std::collections::BTreeSet<_>>()
                 .len(),
-            "duplicate syscall numbers in the deny list"
+            "duplicate syscall numbers in the allow list"
+        );
+    }
+
+    /// The probe half of the confinement proof: inside the confined child, a socket and an
+    /// open must answer EPERM while the allowed calls keep working. Exits directly so the
+    /// harness never needs a refused call.
+    #[test]
+    fn confined_child_probes() {
+        if std::env::var(CHILD_FLAG).is_err() {
+            return;
+        }
+        confine().unwrap_or_else(|e| panic!("confinement refused to install: {e}"));
+        let errno_of = |rc: i32| {
+            if rc == -1 {
+                unsafe { *libc::__errno_location() }
+            } else {
+                0
+            }
+        };
+        let socket_errno = errno_of(unsafe { libc::socket(libc::AF_INET, libc::SOCK_STREAM, 0) });
+        let open_errno = errno_of(unsafe {
+            libc::openat(libc::AT_FDCWD, c"/etc/passwd".as_ptr(), libc::O_RDONLY)
+        });
+        // Allowed calls still work: randomness and a write to the inherited pipe.
+        let mut byte = [0u8; 1];
+        let random_ok = unsafe { libc::getrandom(byte.as_mut_ptr().cast(), 1, 0) } == 1;
+        let line =
+            format!("CONFINED socket={socket_errno} open={open_errno} getrandom_ok={random_ok}\n");
+        unsafe {
+            libc::write(1, line.as_ptr().cast(), line.len());
+        }
+        let proved = socket_errno == libc::EPERM && open_errno == libc::EPERM && random_ok;
+        std::process::exit(if proved { 0 } else { 1 });
+    }
+
+    /// The parent half: spawn this same test binary confined and check its report — deleting
+    /// `confine()` or `deny_dumpable` must fail this, a list check alone cannot.
+    #[test]
+    fn the_filter_is_installed_and_refuses_escape() {
+        if std::env::var(CHILD_FLAG).is_ok() {
+            return;
+        }
+        let output = std::process::Command::new(std::env::current_exe().unwrap())
+            .args(["confined_child_probes", "--test-threads=1"])
+            .env(CHILD_FLAG, "1")
+            .output()
+            .unwrap();
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        assert!(
+            output.status.success(),
+            "confined child failed: status {:?}, stdout {stdout}, stderr {}",
+            output.status.code(),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert!(
+            stdout.contains("socket=1 open=1 getrandom_ok=true"),
+            "unexpected confined report: {stdout}"
         );
     }
 }
