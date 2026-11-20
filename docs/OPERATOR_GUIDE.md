@@ -93,11 +93,15 @@ the env file stays root-only `0600`, readable only by systemd.
    sudo systemd-run --wait --pipe -q \
      -p EnvironmentFile=/etc/intent-studio/intent-studio.env \
      -p User=intent -p Group=intent \
+     -p StateDirectory=intent-studio \
      /opt/intent-studio/bin/intent-server check-config
    ```
 
    (`systemd-run` lets systemd — running as root — read the root-only env file and start the
-   command as `intent`; the file itself stays unreadable to the service user.)
+   command as `intent`; the file itself stays unreadable to the service user. The
+   `StateDirectory` property makes `/var/lib/intent-studio` exist on a fresh host before the
+   command runs — `check-config` proves the store path is writable, which a missing
+   directory is not.)
 
 4. **Migrate and start.**
 
@@ -105,6 +109,7 @@ the env file stays root-only `0600`, readable only by systemd.
    sudo systemd-run --wait --pipe -q \
      -p EnvironmentFile=/etc/intent-studio/intent-studio.env \
      -p User=intent -p Group=intent \
+     -p StateDirectory=intent-studio \
      /opt/intent-studio/bin/intent-server migrate
    sudo systemctl enable --now intent-studio
    journalctl -u intent-studio -n 20          # expect a "listening" line
@@ -124,11 +129,14 @@ the env file stays root-only `0600`, readable only by systemd.
 1. Take a backup (below) and copy it off the host.
 2. Build the new release as in *Install* and copy the two binaries and the workspace into place
    (`/opt/intent-studio/bin/`, `/opt/intent-studio/workspace/`).
-3. Check the configuration and apply migrations with the new binary (`check-config`, then
+3. Tighten the env file if an older install left it looser — it must be root-only, so
+   `chmod 0600 /etc/intent-studio/intent-studio.env` (the install step creates it `0600`;
+   an existing `0640`/`0644` file keeps its mode until changed).
+4. Check the configuration and apply migrations with the new binary (`check-config`, then
    `migrate`, as in *First run*). Migrations only add; none is undone automatically.
-4. `sudo systemctl restart intent-studio`. The old process drains first: readiness turns false,
+5. `sudo systemctl restart intent-studio`. The old process drains first: readiness turns false,
    in-flight requests get up to 10 seconds, the notifier finishes its attempts in flight.
-5. Check `journalctl -u intent-studio -n 50` and `/readyz`.
+6. Check `journalctl -u intent-studio -n 50` and `/readyz`.
 
 To go back, restore the backup from step 1 and the previous binaries; a newer schema is not
 guaranteed to run older binaries.
