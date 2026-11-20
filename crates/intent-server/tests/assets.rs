@@ -428,7 +428,14 @@ async fn uploads_are_sanitized_or_refused_and_references_stay_public() {
     );
 
     // A worker that crashes fails only its own upload: the server keeps answering.
-    let crash = store.join("crash-worker.sh");
+    // The second server is a separate deployment: its own store root, since a
+    // live store's lock (D-061) refuses a second opener on the same root.
+    let crash_store = std::env::temp_dir().join(format!(
+        "intent-store-drill-{}",
+        uuid::Uuid::now_v7().simple()
+    ));
+    std::fs::create_dir_all(&crash_store).unwrap();
+    let crash = crash_store.join("crash-worker.sh");
     std::fs::write(&crash, "#!/bin/sh\nkill -SEGV $$\n").unwrap();
     std::process::Command::new("chmod")
         .arg("+x")
@@ -436,8 +443,9 @@ async fn uploads_are_sanitized_or_refused_and_references_stay_public() {
         .status()
         .unwrap();
     let mut crash_env = env.clone();
-    crash_env.retain(|(k, _)| k != "INTENT_WORKER_BIN");
+    crash_env.retain(|(k, _)| k != "INTENT_WORKER_BIN" && k != "INTENT_STORE_DIR");
     crash_env.push(("INTENT_WORKER_BIN".into(), crash.display().to_string()));
+    crash_env.push(("INTENT_STORE_DIR".into(), crash_store.display().to_string()));
     let crashing = Server::start(crash_env).await;
     let crash_cookie = sign_in(&crashing.base).await;
     let (status, body) = upload(
@@ -483,6 +491,7 @@ async fn uploads_are_sanitized_or_refused_and_references_stay_public() {
     support::assert_no_leaks(&crashing.log(), &needles);
     drop(crashing);
     drop(server);
+    let _ = std::fs::remove_dir_all(&crash_store);
     let _ = std::fs::remove_dir_all(&store);
     db.drop_database().await;
 }
