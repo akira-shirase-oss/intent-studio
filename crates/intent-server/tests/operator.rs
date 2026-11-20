@@ -334,6 +334,11 @@ async fn a_flood_of_bad_session_cookies_is_limited_and_leaves_intake_alone() {
         "a known session was held at 429 by strangers on its address"
     );
 
+    // And the same flood must not keep the operator from ending the session.
+    assert_sign_out_survives(&client, &server.base, &real).await;
+    // Whichever it answered, the session is dead — the tombstone refuses before any cache.
+    assert_eq!(valid().send().await.unwrap().status(), 401);
+
     // Intake never saw the flood: a lead still lands.
     let lead = client
         .post(format!(
@@ -365,4 +370,34 @@ async fn a_flood_of_bad_session_cookies_is_limited_and_leaves_intake_alone() {
     .await;
     assert_eq!(signed.status(), 200);
     db.drop_database().await;
+}
+
+/// Under a still-drained bucket the operator's sign-out must still land: the delete of a
+/// known digest runs on the pool the flood cannot reach, so the answer is 204 — or an
+/// honest 503 saying unsure — never a 2xx that leaves the row live, and the cookie is
+/// always cleared.
+async fn assert_sign_out_survives(client: &reqwest::Client, base: &str, cookie: &str) {
+    let out = client
+        .delete(format!("{base}/v1/operator/session"))
+        .header("cookie", cookie)
+        .header("x-forwarded-for", "10.80.0.1")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(
+        out.headers()
+            .get("set-cookie")
+            .and_then(|v| v.to_str().ok())
+            .map(|v| v.contains("Max-Age=0")),
+        Some(true),
+        "sign-out did not clear the cookie"
+    );
+    match out.status().as_u16() {
+        204 => {}
+        503 => assert_eq!(
+            out.json::<serde_json::Value>().await.unwrap()["signed_out"],
+            false
+        ),
+        status => panic!("sign-out under the flood answered {status}"),
+    }
 }

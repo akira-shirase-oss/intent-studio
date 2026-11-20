@@ -134,21 +134,27 @@ impl Default for SignInGate {
     }
 }
 
-/// The per-address charge on a session check, and three memories of digest state.
+/// The per-address charge on a session check, and the three memories of digest state.
 /// A check is a database write an anonymous client can ask for on every request, so:
 /// `verified` answers for a digest that proved live within its trust window (never past
 /// the session's own expiry or half its idle), `known` remembers digests that once proved
 /// live so their re-checks skip the charge (a flood of strangers on the operator's NAT
 /// cannot hold a known session at 429 at each renewal), and `revoked` tombstones a signed
-/// out digest so a check that raced the delete cannot re-warm it.
+/// out digest so a check that raced the delete cannot re-warm it. One mutex guards all
+/// three: a mark that consulted `revoked` under one lock and wrote `verified` under
+/// another could re-warm a digest a sign-out just killed.
+struct DigestState {
+    /// digest → the instant it stops being trusted without a fresh check.
+    verified: hashlink::LruCache<[u8; 32], u64>,
+    /// digests that once proved live — re-check these without spending the address budget.
+    known: hashlink::LruCache<[u8; 32], ()>,
+    /// revoked digest → tombstone end; a mark inside the tombstone is dropped.
+    revoked: hashlink::LruCache<[u8; 32], u64>,
+}
+
 pub struct SessionGate {
     per_address: Limiter<AddressKey>,
-    /// digest → the instant it stops being trusted without a fresh check.
-    verified: std::sync::Mutex<hashlink::LruCache<[u8; 32], u64>>,
-    /// digests that once proved live — re-check these without spending the address budget.
-    known: std::sync::Mutex<hashlink::LruCache<[u8; 32], ()>>,
-    /// revoked digest → tombstone end; a mark inside the tombstone is dropped.
-    revoked: std::sync::Mutex<hashlink::LruCache<[u8; 32], u64>>,
+    state: std::sync::Mutex<DigestState>,
 }
 
 /// The most a check is trusted: the shorter of this cap, the session's own expiry, and half
@@ -171,17 +177,33 @@ impl SessionGate {
                 ),
                 10_000,
             ),
-            verified: std::sync::Mutex::new(lru()),
-            known: std::sync::Mutex::new(lru()),
-            revoked: std::sync::Mutex::new(lru()),
+            state: std::sync::Mutex::new(DigestState {
+                verified: lru(),
+                known: lru(),
+                revoked: lru(),
+            }),
         }
+    }
+
+    fn state(&self) -> std::sync::MutexGuard<'_, DigestState> {
+        self.state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
     }
 
     /// Whether this digest is trusted live right now — consulted before anything else.
     pub fn was_verified(&self, digest: &[u8; 32], now_ms: u64) -> bool {
-        self.verified
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
+        self.state()
+            .verified
+            .get(digest)
+            .is_some_and(|&until| until > now_ms)
+    }
+
+    /// Whether sign-out revoked this digest inside its tombstone — beats a live row, a
+    /// warm memory and every charge, because the row may not be confirmed gone.
+    pub fn is_revoked(&self, digest: &[u8; 32], now_ms: u64) -> bool {
+        self.state()
+            .revoked
             .get(digest)
             .is_some_and(|&until| until > now_ms)
     }
@@ -189,52 +211,46 @@ impl SessionGate {
     /// Whether this digest once proved live — its re-check skips the per-address charge.
     /// A trusted-live digest counts too.
     pub fn is_known(&self, digest: &[u8; 32], now_ms: u64) -> bool {
-        self.was_verified(digest, now_ms)
-            || self
-                .known
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner)
-                .get(digest)
-                .is_some()
+        let mut state = self.state();
+        state
+            .verified
+            .get(digest)
+            .is_some_and(|&until| until > now_ms)
+            || state.known.get(digest).is_some()
     }
 
     /// A live check (or a sign-in): trust the digest until `until_ms` and remember it as
-    /// known — unless it was revoked so recently the mark could be a sign-out race.
+    /// known — unless it was revoked so recently the mark could be a sign-out race. The
+    /// check and both writes hold the one lock, so a `forget` cannot slip between them.
     pub fn mark_verified(&self, digest: [u8; 32], until_ms: u64, now_ms: u64) {
-        if self
+        let mut state = self.state();
+        if state
             .revoked
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
             .get(&digest)
             .is_some_and(|&until| until > now_ms)
         {
             return;
         }
-        self.verified
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .insert(digest, until_ms);
-        self.known
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .insert(digest, ());
+        state.verified.insert(digest, until_ms);
+        state.known.insert(digest, ());
     }
 
-    /// A session is dead the moment sign-out is asked — always, whether a row was found or
-    /// not: drop it from both memories and tombstone it against a racing re-check.
+    /// A session is dead the moment sign-out is asked: drop it from both memories and
+    /// tombstone it against a racing re-check. Callers tombstone only a digest that was
+    /// known or whose row was actually deleted — a forged cookie may not fill the bound.
     pub fn forget(&self, digest: &[u8; 32], now_ms: u64) {
-        self.verified
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .remove(digest);
-        self.known
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .remove(digest);
-        self.revoked
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .insert(*digest, now_ms + REVOKED_SESSION_MS);
+        let mut state = self.state();
+        state.verified.remove(digest);
+        state.known.remove(digest);
+        state.revoked.insert(*digest, now_ms + REVOKED_SESSION_MS);
+    }
+
+    /// The database says this digest is dead: drop the memory so its next sighting pays
+    /// the charge again — a dead session re-checking free forever is a gift to a flood.
+    pub fn unknow(&self, digest: &[u8; 32]) {
+        let mut state = self.state();
+        state.verified.remove(digest);
+        state.known.remove(digest);
     }
 
     /// Takes the charge a check costs this address.
@@ -262,8 +278,12 @@ pub(crate) struct Caller {
 
 impl Caller {
     pub(crate) fn of(app: &App, peer: Peer, headers: &HeaderMap) -> Self {
-        let address =
-            crate::intake::client_address_of(headers, peer.ip(), &app.config.trusted_proxies);
+        let address = crate::intake::client_address_of(
+            headers,
+            peer.ip(),
+            &app.config.trusted_proxies,
+            app.config.trust_any_forwarded(),
+        );
         let request_id = headers
             .get(&crate::app::REQUEST_ID)
             .and_then(|v| v.to_str().ok())
@@ -312,6 +332,32 @@ struct SignIn {
 }
 
 /// `POST /v1/operator/session` with `{"password": "..."}`.
+/// The bounded argon2 check: a semaphore caps concurrent verifications, the work runs off
+/// the async threads, and the answer is only `bool` — the hash never leaves the helper.
+async fn verify_password(
+    app: &App,
+    hash: crate::config::Secret,
+    password: String,
+) -> Result<bool, ApiError> {
+    let permit = tokio::time::timeout(
+        Duration::from_secs(2),
+        app.hash_gate.clone().acquire_owned(),
+    )
+    .await
+    .map_err(|_| ApiError::Overloaded)?
+    .map_err(|_| ApiError::Overloaded)?;
+    tokio::task::spawn_blocking(move || {
+        let _permit = permit;
+        PasswordHash::new(hash.expose()).is_ok_and(|parsed| {
+            Argon2::default()
+                .verify_password(password.as_bytes(), &parsed)
+                .is_ok()
+        })
+    })
+    .await
+    .map_err(|_| ApiError::Internal(anyhow::anyhow!("password check task failed")))
+}
+
 pub async fn sign_in(
     State(app): State<App>,
     ConnectInfo(peer): ConnectInfo<Peer>,
@@ -323,8 +369,12 @@ pub async fn sign_in(
         return Err(ApiError::SignInDisabled);
     };
     let caller = Caller::of(&app, peer, &headers);
-    let address =
-        crate::intake::client_address_of(&headers, peer.ip(), &app.config.trusted_proxies);
+    let address = crate::intake::client_address_of(
+        &headers,
+        peer.ip(),
+        &app.config.trusted_proxies,
+        app.config.trust_any_forwarded(),
+    );
     // JSON only: a cross-site form cannot send it without a preflight. Checked before the
     // per-address charge so requests that cannot be sign-in attempts cannot churn the
     // bounded table either.
@@ -332,7 +382,7 @@ pub async fn sign_in(
         .get(header::CONTENT_TYPE)
         .and_then(|v| v.to_str().ok())
         .is_some_and(|v| v.starts_with("application/json"));
-    if !is_json {
+    if !is_json && app.config.mutation != Some(crate::config::Mutation::NoContentType) {
         return Err(ApiError::UnsupportedMediaType);
     }
     // Per address first, alone: a request refused here never touches a verification budget.
@@ -353,33 +403,23 @@ pub async fn sign_in(
     // place (D-052), and it cannot guess past its own bound either.
     // The known-address lookup runs on its own one-connection pool: a cookie flood queuing
     // on the sessions pool must not turn sign-in into 5xx, and intake's pool is not for it.
+    // If it fails anyway the address is simply unknown and takes the global path — a lookup
+    // outage may never hold the operator's own sign-in at 5xx (D-052).
     let known = app
         .known_db
         .signed_in_from_recently(&caller.address, KNOWN_ADDRESS_WINDOW)
-        .await?;
+        .await
+        .unwrap_or_else(|error| {
+            tracing::warn!(%error, "known-address lookup failed; treating address as unknown");
+            false
+        });
     let reserved_known = app
         .sign_in
         .reserve_for(known, AddressKey::of(address), app.now_ms())
         .map_err(|RetryAfter(secs)| ApiError::RateLimited {
             retry_after_secs: secs,
         })?;
-    let permit = tokio::time::timeout(
-        Duration::from_secs(2),
-        app.hash_gate.clone().acquire_owned(),
-    )
-    .await
-    .map_err(|_| ApiError::Overloaded)?
-    .map_err(|_| ApiError::Overloaded)?;
-    let verified = tokio::task::spawn_blocking(move || {
-        let _permit = permit;
-        PasswordHash::new(hash.expose()).is_ok_and(|parsed| {
-            Argon2::default()
-                .verify_password(password.as_bytes(), &parsed)
-                .is_ok()
-        })
-    })
-    .await
-    .map_err(|_| ApiError::Internal(anyhow::anyhow!("password check task failed")))?;
+    let verified = verify_password(&app, hash, password).await?;
     if !verified {
         tracing::info!("operator sign-in refused");
         caller
@@ -399,15 +439,15 @@ pub async fn sign_in(
         .await?;
     // A fresh session is warm: the first requests after sign-in answer from memory.
     let now = app.now_ms();
-    let until =
-        now.saturating_add(VERIFIED_SESSION_MS)
-            .min(now.saturating_add(
-                u64::try_from(app.config.session_ttl.as_millis()).unwrap_or(u64::MAX),
-            ))
-            .min(now.saturating_add(
-                u64::try_from(app.config.session_idle.as_millis()).unwrap_or(u64::MAX) / 2,
-            ));
-    app.session_gate.mark_verified(digest(&token), until, now);
+    app.session_gate.mark_verified(
+        digest(&token),
+        trust_until(
+            now,
+            u64::try_from(app.config.session_ttl.as_millis()).unwrap_or(u64::MAX),
+            u64::try_from(app.config.session_idle.as_millis()).unwrap_or(u64::MAX),
+        ),
+        now,
+    );
     caller
         .audit(&app, "operator.sign_in", "operator", "{}")
         .await?;
@@ -439,53 +479,98 @@ pub async fn session(
     Ok(no_store(Json(json!({ "signed_in": true })).into_response()))
 }
 
-/// `DELETE /v1/operator/session`.
+/// `DELETE /v1/operator/session`. Revocation is a fact, not a wish: 204 only once the row
+/// is confirmed gone (or was never there for one of ours); anything unconfirmed answers
+/// 503 `{"signed_out":false}` — the cookie is still cleared either way, so a client can
+/// always drop its side. A digest that never proved itself gets 401 like every other
+/// operator route; the tombstone budget stays for digests that were ours or really died.
 pub async fn sign_out(
     State(app): State<App>,
     ConnectInfo(peer): ConnectInfo<Peer>,
     headers: HeaderMap,
 ) -> Result<Response, ApiError> {
     let name = cookie_name(&app);
-    if let Some(token) = session_token(&headers, name) {
-        let token_digest = digest(token);
-        let now = app.now_ms();
-        // A known digest signs out without a charge: the operator must always be able to end
-        // their own session, even while strangers on their address are being refused. An
-        // unknown digest still pays — a delete is a session check's write.
-        let known = app.session_gate.is_known(&token_digest, now);
-        let address = AddressKey::of(crate::intake::client_address_of(
-            &headers,
-            peer.ip(),
-            &app.config.trusted_proxies,
-        ));
-        let mut charged = false;
-        if !known && app.session_gate.charge(address, now).is_ok() {
-            charged = true;
-        }
-        // Whether the charge passed or not, the digest is forgotten and tombstoned and the
-        // cookie below is always cleared: a refused or erroring sign-out must never strand
-        // the session. A found row refunds a charged delete, as a live check would.
-        if (known || charged)
-            && let Ok(true) = app.sessions.delete_session(&token_digest).await
-            && charged
-        {
-            app.session_gate.refund(address);
-        }
-        app.session_gate.forget(&token_digest, now);
-    }
     let secure = if app.config.cookie_secure {
         "; Secure"
     } else {
         ""
     };
     let clear = format!("{name}=; HttpOnly; SameSite=Strict; Path=/; Max-Age=0{secure}");
-    let mut response = StatusCode::NO_CONTENT.into_response();
-    response.headers_mut().insert(
-        header::SET_COOKIE,
-        HeaderValue::from_str(&clear)
-            .map_err(|_| ApiError::Internal(anyhow::anyhow!("cookie is not a header value")))?,
-    );
-    Ok(response)
+    let answer = |status: StatusCode, body: Option<serde_json::Value>| {
+        let mut response = match body {
+            Some(body) => (status, Json(body)).into_response(),
+            None => status.into_response(),
+        };
+        if let Ok(value) = HeaderValue::from_str(&clear) {
+            response.headers_mut().insert(header::SET_COOKIE, value);
+        }
+        response
+    };
+    let Some(token) = session_token(&headers, name) else {
+        return Err(ApiError::Unauthorized);
+    };
+    let token_digest = digest(token);
+    let now = app.now_ms();
+    // Ours — known from a live check, or tombstoned by a sign-out already — ends on the
+    // pool a cookie flood cannot reach; the operator's sign-out never waits behind it.
+    // Anyone else pays the check's charge first: an unsigned delete is a database write.
+    let ours = app.session_gate.is_known(&token_digest, now)
+        || app.session_gate.is_revoked(&token_digest, now);
+    // The proof's seam: report the delete without running it — and without the tombstone
+    // that would refuse the still-live session anyway.
+    let faked = ours
+        && app
+            .config
+            .mutation_is(crate::config::Mutation::NoSessionDelete);
+    let deleted = if ours {
+        if faked {
+            Some(true)
+        } else {
+            app.known_db.delete_session(&token_digest).await.ok()
+        }
+    } else {
+        let address = AddressKey::of(crate::intake::client_address_of(
+            &headers,
+            peer.ip(),
+            &app.config.trusted_proxies,
+            app.config.trust_any_forwarded(),
+        ));
+        if app.session_gate.charge(address, now).is_err() {
+            None // the check could not even be afforded — nothing is confirmed
+        } else {
+            match app.sessions.delete_session(&token_digest).await {
+                Ok(true) => {
+                    app.session_gate.refund(address);
+                    Some(true)
+                }
+                Ok(false) => Some(false),
+                Err(_) => None,
+            }
+        }
+    };
+    match (deleted, ours) {
+        // Confirmed gone — or, for a digest that was ours, confirmed absent: either way it
+        // is dead, to the table and to memory.
+        (Some(true), _) | (Some(false), true) => {
+            if !faked {
+                app.session_gate.forget(&token_digest, now);
+            }
+            Ok(answer(StatusCode::NO_CONTENT, None))
+        }
+        // A forged or long-dead digest: nothing was ours to end.
+        (Some(false), false) => Ok(answer(StatusCode::UNAUTHORIZED, None)),
+        // Refused or failed before the row was confirmed gone — say so, do not pretend.
+        _ => {
+            if ours {
+                // A tombstone is owed to a digest that was ours: it may still be live.
+                app.session_gate.forget(&token_digest, now);
+            }
+            Ok(answer(
+                StatusCode::SERVICE_UNAVAILABLE,
+                Some(json!({ "signed_out": false })),
+            ))
+        }
+    }
 }
 
 #[derive(Deserialize)]
@@ -581,11 +666,19 @@ pub(crate) async fn require_operator(
     peer: Peer,
     headers: &HeaderMap,
 ) -> Result<(), ApiError> {
+    if app.config.mutation == Some(crate::config::Mutation::NoSessionCheck) {
+        return Ok(());
+    }
     let Some(token) = session_token(headers, cookie_name(app)) else {
         return Err(ApiError::Unauthorized);
     };
     let token_digest = digest(token);
     let now = app.now_ms();
+    // A digest a sign-out killed is refused before anything else: its row may still exist
+    // (a delete that errored or a check that raced), so the tombstone must answer for it.
+    if app.session_gate.is_revoked(&token_digest, now) {
+        return Err(ApiError::Unauthorized);
+    }
     // A digest trusted from a live check moments ago needs no database hit and no charge.
     if app.session_gate.was_verified(&token_digest, now) {
         return Ok(());
@@ -599,6 +692,7 @@ pub(crate) async fn require_operator(
         headers,
         peer.ip(),
         &app.config.trusted_proxies,
+        app.config.trust_any_forwarded(),
     ));
     if !known && let Err(RetryAfter(secs)) = app.session_gate.charge(address, now) {
         return Err(ApiError::RateLimited {
@@ -607,27 +701,42 @@ pub(crate) async fn require_operator(
     }
     match app
         .sessions
-        .session_expiry(&token_digest, app.config.session_idle)
+        .session_lifetime(&token_digest, app.config.session_idle)
         .await
     {
-        Ok(Some(expires_at)) => {
+        Ok(Some(remaining_secs)) => {
             if !known {
                 app.session_gate.refund(address);
             }
-            let expires_ms = u64::try_from(expires_at.unix_timestamp().max(0))
-                .unwrap_or(u64::MAX)
-                .saturating_mul(1_000);
+            let remaining_ms = u64::try_from(
+                Duration::try_from_secs_f64(remaining_secs.max(0.0))
+                    .unwrap_or_default()
+                    .as_millis(),
+            )
+            .unwrap_or(u64::MAX);
             let idle_ms = u64::try_from(app.config.session_idle.as_millis()).unwrap_or(u64::MAX);
-            let until = now
-                .saturating_add(VERIFIED_SESSION_MS)
-                .min(expires_ms)
-                .min(now.saturating_add(idle_ms / 2));
-            app.session_gate.mark_verified(token_digest, until, now);
+            app.session_gate.mark_verified(
+                token_digest,
+                trust_until(now, remaining_ms, idle_ms),
+                now,
+            );
             Ok(())
         }
-        Ok(None) => Err(ApiError::Unauthorized),
+        // The table says dead: drop the memory so the next sighting of this digest pays
+        // the charge like any stranger — a dead session re-checking free is a flood's gift.
+        Ok(None) => {
+            app.session_gate.unknow(&token_digest);
+            Err(ApiError::Unauthorized)
+        }
         Err(e) => Err(e.into()),
     }
+}
+
+/// How long a live check may be trusted without asking again: never past the 60 s cap, the
+/// session's own remaining lifetime, or half its idle timeout (a check must refresh at
+/// least that often, or the idle deadline is a lie).
+fn trust_until(now_ms: u64, remaining_ms: u64, idle_ms: u64) -> u64 {
+    now_ms.saturating_add(VERIFIED_SESSION_MS.min(remaining_ms).min(idle_ms / 2))
 }
 
 /// The session token from the `Cookie` header, if it is shaped like one (64 hex digits).
@@ -789,6 +898,33 @@ mod tests {
         }
         assert!(gate.charge(key(1), 2_999).is_err());
         assert!(gate.charge(key(1), 3_000).is_ok());
+    }
+
+    #[test]
+    fn trust_ends_at_the_soonest_of_the_cache_absolute_and_idle_bounds() {
+        // 5 s of session left beats the 60 s cache ceiling outright.
+        assert_eq!(trust_until(1_000, 5_000, 3_600_000), 6_000);
+        // A session with days left still trusts only 60 s.
+        assert_eq!(trust_until(1_000, 86_400_000, 3_600_000), 61_000);
+        // Half the idle window can be the tightest of the three.
+        assert_eq!(trust_until(1_000, 86_400_000, 40_000), 21_000);
+        // Nothing left: no trust at all.
+        assert_eq!(trust_until(1_000, 0, 3_600_000), 1_000);
+    }
+
+    #[test]
+    fn a_dead_digest_is_forgotten_not_kept_known() {
+        let gate = SessionGate::new();
+        let digest = [8u8; 32];
+        gate.mark_verified(digest, 60_000, 0);
+        assert!(gate.is_known(&digest, 70_000));
+        // The table said dead: the memory lets go — the next sighting pays the charge.
+        gate.unknow(&digest);
+        assert!(!gate.is_known(&digest, 70_000));
+        assert!(!gate.was_verified(&digest, 0));
+        // And unknowing never tombstones: a re-created session may warm again.
+        gate.mark_verified(digest, 200_000, 70_001);
+        assert!(gate.was_verified(&digest, 70_001));
     }
 
     #[test]

@@ -20,20 +20,21 @@ impl Db {
         .map_err(classify)
     }
 
-    /// The expiry of the session with this digest if it exists, has not expired and was used
-    /// within `idle`; a live session is touched in the same statement, so use keeps it alive.
-    /// The caller needs `expires_at` to bound how long a check may be trusted without asking
-    /// again — trusting past it would keep a dead session warm.
-    pub async fn session_expiry(
+    /// Seconds of lifetime left for the session with this digest if it exists, has not
+    /// expired and was used within `idle`; a live session is touched in the same statement,
+    /// so use keeps it alive. The remaining time is computed at the database so the caller
+    /// never compares a monotonic clock against `expires_at`'s epoch — the bound it puts
+    /// on trusting this check must come in the same units.
+    pub async fn session_lifetime(
         &self,
         digest: &[u8; 32],
         idle: Duration,
-    ) -> Result<Option<time::OffsetDateTime>, DbError> {
+    ) -> Result<Option<f64>, DbError> {
         sqlx::query_scalar(
             "UPDATE operator_sessions SET last_seen_at = now()
              WHERE token_digest = $1 AND expires_at > now()
                AND last_seen_at > now() - $2 * interval '1 second'
-             RETURNING expires_at",
+             RETURNING extract(epoch from expires_at - now())",
         )
         .bind(digest.as_slice())
         .bind(f64::from(u32::try_from(idle.as_secs()).unwrap_or(u32::MAX)))
