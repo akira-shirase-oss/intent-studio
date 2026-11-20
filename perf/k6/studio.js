@@ -7,15 +7,18 @@
 // lints and audits). setup() signs in once (sign-in is limited to 5 a minute per address) and
 // builds one client with approved facts and a brief; every request then reuses the session.
 //
-//   BASE_URL   intent-server              (http://127.0.0.1:59406)
-//   PASSWORD   the operator password      (required)
-//   RATE       requests per second        (200)
-//   TOTAL      requests in the run        (RATE * 60; the full run is 1,000,000)
-//   SUMMARY    where handleSummary writes the k6 summary JSON
+//   BASE_URL     intent-server            (http://127.0.0.1:59406)
+//   PASSWORD     the operator password    (required)
+//   RATE         requests per second      (200)
+//   TOTAL        requests in the run      (RATE * 60; the full run is 1,000,000)
+//   P99_READ_MS  p99 budget for reads     (50)
+//   P99_SPEC_MS  p99 budget for the spec check (100)
+//   SUMMARY      where handleSummary writes the k6 summary JSON
 //
 // Thresholds (proposed, D-063: to be set from the first quiet baseline, as D-054 did for
 // intake): reads p99 < 50 ms, spec check p99 < 100 ms, zero failed requests, zero dropped
-// iterations above 0.01%.
+// iterations above 0.01%. scripts/studio-load.sh runs this and records the result under
+// perf/results/.
 
 import http from 'k6/http';
 import exec from 'k6/execution';
@@ -25,6 +28,8 @@ const BASE_URL = __ENV.BASE_URL || 'http://127.0.0.1:59406';
 const PASSWORD = __ENV.PASSWORD;
 const RATE = Number(__ENV.RATE || 200);
 const TOTAL = Number(__ENV.TOTAL || RATE * 60);
+const P99_READ_MS = Number(__ENV.P99_READ_MS || 50);
+const P99_SPEC_MS = Number(__ENV.P99_SPEC_MS || 100);
 const DURATION_S = Math.ceil(TOTAL / RATE);
 const MAX_DROPPED = Math.max(1, Math.floor(TOTAL * 0.0001));
 
@@ -43,8 +48,8 @@ export const options = {
 		}
 	},
 	thresholds: {
-		'http_req_duration{kind:read}': ['p(99)<50'],
-		'http_req_duration{kind:spec}': ['p(99)<100'],
+		'http_req_duration{kind:read}': [`p(99)<${P99_READ_MS}`],
+		'http_req_duration{kind:spec}': [`p(99)<${P99_SPEC_MS}`],
 		http_req_failed: ['rate==0'],
 		dropped_iterations: [`count<${MAX_DROPPED}`]
 	},
