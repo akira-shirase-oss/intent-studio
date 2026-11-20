@@ -132,7 +132,7 @@ async fn main() -> anyhow::Result<()> {
                 );
                 std::process::exit(1);
             }
-            if let Err(error) = intent_server::serve::studio(&config) {
+            if let Err(error) = intent_server::serve::check_studio(&config) {
                 eprintln!("configuration refused: {error:#}");
                 std::process::exit(1);
             }

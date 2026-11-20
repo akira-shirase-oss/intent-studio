@@ -95,6 +95,8 @@ server=$!
 pids+=("$server")
 for _ in $(seq 1 100); do curl -sf "http://127.0.0.1:$port/readyz" >/dev/null && break; sleep 0.1; done
 curl -sf "http://127.0.0.1:$port/readyz" | grep -q '"ready":true' || fail "not ready: $(tail -5 "$scratch/server.log")"
+# The upgrade path runs check-config while the old server still holds the store lock.
+run check-config >/dev/null || fail "check-config refused the running server's store"
 headers="$(curl -s -D - -o /dev/null "http://127.0.0.1:$port/workspace/")"
 grep -qi "^HTTP/1.1 200" <<<"$headers" || fail "the workspace is not served"
 grep -qi "content-security-policy: frame-ancestors 'none'" <<<"$headers" || fail "the workspace has no CSP"

@@ -86,6 +86,57 @@ pub fn studio(config: &Config) -> anyhow::Result<crate::app::Studio> {
     })
 }
 
+/// `check-config`'s studio pass: everything `studio()` proves *except* the live store lock,
+/// which the running server holds through an upgrade — a held lock is the old server's, not
+/// a configuration problem. The store root must exist or be creatable under a writable
+/// ancestor and writable itself, the same proof `open` makes without the side effects.
+pub fn check_studio(config: &Config) -> anyhow::Result<()> {
+    let settings = &config.studio;
+    if let Some(dir) = &settings.store_dir {
+        check_store_dir(dir)?;
+        anyhow::ensure!(
+            settings.worker_bin.is_file(),
+            "INTENT_WORKER_BIN: no worker at {} (build `intent-worker`, or set the path)",
+            settings.worker_bin.display()
+        );
+    }
+    intent_egress::Guard::system()
+        .map_err(|e| anyhow::anyhow!("building the egress guard's TLS configuration: {e}"))?;
+    Ok(())
+}
+
+/// The store-root half of [`check_studio`].
+fn check_store_dir(dir: &std::path::Path) -> anyhow::Result<()> {
+    anyhow::ensure!(
+        !dir.exists() || dir.is_dir(),
+        "INTENT_STORE_DIR {}: not a directory",
+        dir.display()
+    );
+    // `open` creates the whole tree; here, prove the nearest existing ancestor is writable.
+    let mut probe = dir;
+    while !probe.is_dir() {
+        probe = probe.parent().ok_or_else(|| {
+            anyhow::anyhow!(
+                "INTENT_STORE_DIR {}: no existing directory above it",
+                dir.display()
+            )
+        })?;
+    }
+    // A live store's tmp/ is the write area and is swept on every open, so a probe left
+    // there by a crash cleans itself up.
+    let probe_dir = if probe.join("tmp").is_dir() {
+        probe.join("tmp")
+    } else {
+        probe.to_path_buf()
+    };
+    let marker = probe_dir.join(format!("probe-check-{}", uuid::Uuid::new_v4().simple()));
+    std::fs::write(&marker, b"")
+        .and_then(|()| std::fs::remove_file(&marker))
+        .map_err(|e| {
+            anyhow::anyhow!("INTENT_STORE_DIR {}: not writable: {e}", probe_dir.display())
+        })
+}
+
 /// The session table's pool: small, like the prober's (D-047), so a flood of shaped-but-random
 /// cookies turns into bounded writes here — never into intake's pool.
 fn sessions_db(config: &Config) -> anyhow::Result<Db> {
