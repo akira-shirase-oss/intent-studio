@@ -268,22 +268,13 @@ fn value_is_safe(value: &str, strict: bool) -> bool {
     if value.contains('\\') {
         return false;
     }
-    // Quoted spans come out before the scan: `(` inside '…' or "…" is text (a font name), not
-    // a call. An unterminated quote hides the rest of the value — refuse the whole attribute.
-    let mut unquoted = String::with_capacity(value.len());
-    let mut quote = None;
-    for c in value.chars() {
-        match quote {
-            Some(q) if c == q => quote = None,
-            Some(_) => {}
-            None if c == '\'' || c == '"' => quote = Some(c),
-            None => unquoted.push(c),
-        }
-    }
-    if quote.is_some() {
+    // A CSS comment can hide a token from any scan that sees it (`/*'*/url(x)` — the quote
+    // tricks a quote-stripper into removing the payload, the browser drops the comments and
+    // runs it). Comments are refused everywhere rather than stripped.
+    if value.contains("/*") {
         return false;
     }
-    let lower: String = unquoted
+    let lower: String = value
         .chars()
         .filter(|c| !c.is_whitespace() && !c.is_control())
         .collect::<String>()
@@ -390,19 +381,19 @@ fn use_cost<'a, 'input>(
     let mut total = 1_u32;
     let mut height = 1_u32;
     for descendant in node.descendants() {
-        // A `use` inside a `defs`/`symbol` subtree is never painted directly — it expands only
-        // when its subtree is instantiated by a reference, and it is counted in that call.
-        // Skipping it here keeps a use inside an unreferenced defs from counting twice.
-        if descendant.is_element()
-            && descendant.tag_name().name() == "use"
-            && descendant.tag_name().namespace() == Some(SVG_NS)
-            && descendant
-                .ancestors()
-                .take_while(|a| a.id() != node.id())
-                .any(|a| {
-                    a.tag_name().namespace() == Some(SVG_NS)
-                        && matches!(a.tag_name().name(), "defs" | "symbol")
-                })
+        if !descendant.is_element() {
+            continue;
+        }
+        // A reference inside a `defs`/`symbol` subtree is never painted directly — it
+        // expands only when its subtree is instantiated by a reference, and it is counted
+        // in that call. Skipping it here keeps a dormant one from counting twice.
+        if descendant
+            .ancestors()
+            .take_while(|a| a.id() != node.id())
+            .any(|a| {
+                a.tag_name().namespace() == Some(SVG_NS)
+                    && matches!(a.tag_name().name(), "defs" | "symbol")
+            })
         {
             continue;
         }
@@ -411,10 +402,39 @@ fn use_cost<'a, 'input>(
             total = total.saturating_add(expansions);
             height = height.max(chain.saturating_add(1));
         }
+        // The same fan-out through paint references: a renderer draws a mask or clip
+        // subtree once per element that names it, so each `url(#id)` costs like a `use`.
+        for attr in ["mask", "clip-path"] {
+            if let Some(target) = descendant
+                .attribute(attr)
+                .and_then(url_fragment)
+                .and_then(|id| by_id.get(id).copied())
+            {
+                let (expansions, chain) = use_cost(target, by_id, memo, visiting)?;
+                total = total.saturating_add(expansions);
+                height = height.max(chain.saturating_add(1));
+            }
+        }
     }
     visiting.remove(&node.id());
     memo.insert(node.id(), (total, height));
     Ok((total, height))
+}
+
+/// The `#id` inside a `url(...)` paint reference, if the whole value is one fragment.
+/// Values reaching here already passed [`value_is_safe`], so the shape is `url(#id)`,
+/// optionally quoted.
+fn url_fragment(value: &str) -> Option<&str> {
+    let inner = value
+        .trim()
+        .strip_prefix("url(")?
+        .trim_end()
+        .strip_suffix(')')?
+        .trim()
+        .trim_matches(|c| c == '"' || c == '\'');
+    is_fragment(inner)
+        .then(|| inner.strip_prefix('#'))
+        .flatten()
 }
 
 /// A same-document reference: `#` followed by an id's characters.
@@ -623,6 +643,51 @@ mod tests {
         // slice land mid-character. Now the value is simply refused, never a panic.
         let out = sanitize(&doc("<rect fill=\"\u{10700}(x)\"/>")).unwrap().svg;
         assert!(!out.contains('\u{10700}'), "{out}");
+    }
+
+    #[test]
+    fn a_comment_cannot_smuggle_a_reference_past_the_scan() {
+        // `/*'*/` reads as a quoted span to a quote-stripper and as a comment to a browser:
+        // the stripper removes the url() payload, the browser drops the comments and loads
+        // it. Comments are refused outright, so the attribute never survives.
+        for value in [
+            "/*'*/url(https://beacon.example/m.png)/*'*/",
+            "url(https://beacon.example/m.png)",
+            "/**/url(#a)/**/",
+            "url(/*x*/#a)",
+            "d\\61 ta:image/png,x",
+        ] {
+            let out = sanitize(&doc(&format!("<rect mask=\"{value}\"/>")))
+                .unwrap()
+                .svg;
+            assert!(!out.contains("mask"), "comment-smuggled mask kept: {out}");
+            assert!(!out.contains("beacon"), "outside reference kept: {out}");
+        }
+        // A same-document url() still passes — the refusal is about hiding, not masking.
+        let ok = sanitize(&doc("<defs><clipPath id=\"c\"><rect/></clipPath></defs>\
+                                <rect clip-path=\"url(#c)\"/>"))
+        .unwrap();
+        assert!(ok.svg.contains("clip-path=\"url(#c)\""), "{}", ok.svg);
+    }
+
+    #[test]
+    fn mask_and_clip_references_pay_the_same_expansion_cost() {
+        // 40 rects each naming mask #m, which holds 14 uses: 40 × 15 = 600 > 512 — the same
+        // bomb as `use` fan-out, spelled through a paint attribute. The dormant mask's own
+        // subtree is counted only through the references.
+        let mut bomb = String::from("<defs><mask id=\"m\">");
+        for _ in 0..14 {
+            let _ = write!(bomb, "<use href=\"#r\"/>");
+        }
+        bomb.push_str("</mask><rect id=\"r\"/></defs>");
+        for _ in 0..40 {
+            let _ = write!(bomb, "<rect mask=\"url(#m)\"/>");
+        }
+        assert_eq!(
+            sanitize(&doc(&bomb)),
+            Err(WorkerRefusal::TooLarge),
+            "mask fan-out escaped the expansion bound"
+        );
     }
 
     #[test]
