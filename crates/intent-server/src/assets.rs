@@ -147,7 +147,7 @@ pub async fn upload(
     headers: HeaderMap,
     multipart: Result<Multipart, MultipartRejection>,
 ) -> Result<Response, ApiError> {
-    require_operator(&app, &headers).await?;
+    require_operator(&app, peer, &headers).await?;
     if !headers.contains_key(UPLOAD_HEADER) {
         return Err(ApiError::UnsupportedMediaType);
     }
@@ -294,7 +294,7 @@ pub async fn list(
     Path(tenant): Path<String>,
     headers: HeaderMap,
 ) -> Result<Response, ApiError> {
-    require_operator(&app, &headers).await?;
+    require_operator(&app, peer, &headers).await?;
     let tenant = tenant_id(&tenant)?;
     require_tenant(&app, tenant).await?;
     let rows = app.db.assets(tenant).await?;
@@ -313,10 +313,11 @@ pub async fn list(
 /// can never run as a page: a sandboxing policy, no sniffing, fonts as downloads.
 pub async fn content(
     State(app): State<App>,
+    ConnectInfo(peer): ConnectInfo<Peer>,
     Path((tenant, asset)): Path<(String, String)>,
     headers: HeaderMap,
 ) -> Result<Response, ApiError> {
-    require_operator(&app, &headers).await?;
+    require_operator(&app, peer, &headers).await?;
     let tenant = tenant_id(&tenant)?;
     let asset: AssetId = asset.parse().map_err(|_| ApiError::NotFound)?;
     let row = app
@@ -391,7 +392,7 @@ pub async fn fetch_snapshot(
     headers: HeaderMap,
     body: Body,
 ) -> Result<Response, ApiError> {
-    require_operator(&app, &headers).await?;
+    require_operator(&app, peer, &headers).await?;
     let is_json = headers
         .get(header::CONTENT_TYPE)
         .and_then(|v| v.to_str().ok())
@@ -488,7 +489,7 @@ pub async fn snapshots(
     Path((tenant, brief)): Path<(String, String)>,
     headers: HeaderMap,
 ) -> Result<Response, ApiError> {
-    require_operator(&app, &headers).await?;
+    require_operator(&app, peer, &headers).await?;
     let tenant = tenant_id(&tenant)?;
     let brief: BriefId = brief.parse().map_err(|_| ApiError::NotFound)?;
     if app.db.brief(tenant, brief, None).await?.is_none() {

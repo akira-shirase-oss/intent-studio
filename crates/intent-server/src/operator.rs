@@ -20,7 +20,10 @@ use intent_domain::{
     ratelimit::{AddressKey, RetryAfter},
 };
 use intent_domain::{
-    limits::{SIGN_IN_GLOBAL_PER_MINUTE, SIGN_IN_PER_ADDRESS_PER_MINUTE},
+    limits::{
+        SESSION_CHECK_FAILURES_PER_ADDRESS_PER_MINUTE, SIGN_IN_GLOBAL_PER_MINUTE,
+        SIGN_IN_PER_ADDRESS_PER_MINUTE,
+    },
     ratelimit::Quota,
 };
 use serde::Deserialize;
@@ -93,6 +96,44 @@ impl SignInGate {
 }
 
 impl Default for SignInGate {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+/// The per-address charge on a session check, with time passed in. A check is a database write
+/// an anonymous client can ask for on every request; the charge is taken before the write and
+/// refunded when the session proves live, so only failed checks are counted — a flood of random
+/// cookies costs its address a bounded number of writes, then hears 429 without touching the db.
+pub struct SessionGate {
+    per_address: Limiter<AddressKey>,
+}
+
+impl SessionGate {
+    /// The D-019 bound, at the sign-in table's size.
+    pub fn new() -> Self {
+        Self {
+            per_address: Limiter::new(
+                Quota::per_minute(SESSION_CHECK_FAILURES_PER_ADDRESS_PER_MINUTE).unwrap_or_else(
+                    || unreachable!("invariant: the session-check quota is non-zero"),
+                ),
+                10_000,
+            ),
+        }
+    }
+
+    /// Takes the charge a check costs this address.
+    pub fn charge(&self, address: AddressKey, now_ms: u64) -> Result<(), RetryAfter> {
+        self.per_address.check(address, now_ms)
+    }
+
+    /// A live session (or a session that really was deleted) proved the request: refund.
+    pub fn refund(&self, address: AddressKey) {
+        self.per_address.refund(address);
+    }
+}
+
+impl Default for SessionGate {
     fn default() -> Self {
         Self::new()
     }
@@ -260,16 +301,38 @@ pub async fn sign_in(
 }
 
 /// `GET /v1/operator/session`: 200 when signed in, else 401.
-pub async fn session(State(app): State<App>, headers: HeaderMap) -> Result<Response, ApiError> {
-    require_operator(&app, &headers).await?;
+pub async fn session(
+    State(app): State<App>,
+    ConnectInfo(peer): ConnectInfo<Peer>,
+    headers: HeaderMap,
+) -> Result<Response, ApiError> {
+    require_operator(&app, peer, &headers).await?;
     Ok(no_store(Json(json!({ "signed_in": true })).into_response()))
 }
 
 /// `DELETE /v1/operator/session`.
-pub async fn sign_out(State(app): State<App>, headers: HeaderMap) -> Result<Response, ApiError> {
+pub async fn sign_out(
+    State(app): State<App>,
+    ConnectInfo(peer): ConnectInfo<Peer>,
+    headers: HeaderMap,
+) -> Result<Response, ApiError> {
     let name = cookie_name(&app);
     if let Some(token) = session_token(&headers, name) {
-        app.db.delete_session(&digest(token)).await?;
+        // A delete is a session check's write too: charged per address, refunded when a row
+        // really went (the request proved something to delete).
+        let address = AddressKey::of(crate::intake::client_address_of(
+            &headers,
+            peer.ip(),
+            &app.config.trusted_proxies,
+        ));
+        if let Err(RetryAfter(secs)) = app.session_gate.charge(address, app.now_ms()) {
+            return Err(ApiError::RateLimited {
+                retry_after_secs: secs,
+            });
+        }
+        if app.sessions.delete_session(&digest(token)).await? {
+            app.session_gate.refund(address);
+        }
     }
     let secure = if app.config.cookie_secure {
         "; Secure"
@@ -301,7 +364,7 @@ pub async fn inbox(
     headers: HeaderMap,
     params: Result<Query<InboxParams>, QueryRejection>,
 ) -> Result<Response, ApiError> {
-    require_operator(&app, &headers).await?;
+    require_operator(&app, peer, &headers).await?;
     let Query(params) = params.map_err(|_| ApiError::MalformedBody)?;
     let site = params
         .site
@@ -372,15 +435,32 @@ pub(crate) fn no_store(mut response: Response) -> Response {
 }
 
 /// 401 unless the request carries a live operator session (not expired, not idle too long).
-pub(crate) async fn require_operator(app: &App, headers: &HeaderMap) -> Result<(), ApiError> {
+/// The check is a database write; per address it is charged on failure and refunded on a live
+/// session, and it runs on its own small pool so a flood of bad cookies cannot starve intake's.
+pub(crate) async fn require_operator(
+    app: &App,
+    peer: Peer,
+    headers: &HeaderMap,
+) -> Result<(), ApiError> {
     let Some(token) = session_token(headers, cookie_name(app)) else {
         return Err(ApiError::Unauthorized);
     };
+    let address = AddressKey::of(crate::intake::client_address_of(
+        headers,
+        peer.ip(),
+        &app.config.trusted_proxies,
+    ));
+    if let Err(RetryAfter(secs)) = app.session_gate.charge(address, app.now_ms()) {
+        return Err(ApiError::RateLimited {
+            retry_after_secs: secs,
+        });
+    }
     if app
-        .db
+        .sessions
         .session_is_valid(&digest(token), app.config.session_idle)
         .await?
     {
+        app.session_gate.refund(address);
         Ok(())
     } else {
         Err(ApiError::Unauthorized)
@@ -450,6 +530,35 @@ mod tests {
         assert!(gate.reserve(2_999).is_err());
         assert!(gate.reserve(3_000).is_ok());
         assert!(gate.reserve(3_000).is_err());
+    }
+
+    #[test]
+    fn a_session_check_is_charged_per_address_and_refunded_on_success() {
+        let gate = SessionGate::new();
+        // Twenty failed checks spend one address's minute; the twenty-first is refused
+        // without reaching the database.
+        for _ in 0..20 {
+            gate.charge(key(1), 0).unwrap();
+        }
+        assert!(gate.charge(key(1), 0).is_err());
+        // A live session (or a delete that found a row) gives the charge back.
+        gate.refund(key(1));
+        assert!(gate.charge(key(1), 0).is_ok());
+        // Another address's checks are untouched.
+        assert_eq!(
+            (0..20).filter(|_| gate.charge(key(2), 0).is_ok()).count(),
+            20
+        );
+    }
+
+    #[test]
+    fn the_session_charge_refills() {
+        let gate = SessionGate::new();
+        for _ in 0..20 {
+            gate.charge(key(1), 0).unwrap();
+        }
+        assert!(gate.charge(key(1), 2_999).is_err());
+        assert!(gate.charge(key(1), 3_000).is_ok());
     }
 
     #[test]

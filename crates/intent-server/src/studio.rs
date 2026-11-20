@@ -53,11 +53,12 @@ fn ts(t: OffsetDateTime) -> Option<String> {
 /// 401 first, then JSON only, then the capped body.
 async fn operator_json(
     app: &App,
+    peer: Peer,
     headers: &HeaderMap,
     body: Body,
     cap: usize,
 ) -> Result<axum::body::Bytes, ApiError> {
-    require_operator(app, headers).await?;
+    require_operator(app, peer, headers).await?;
     let is_json = headers
         .get(header::CONTENT_TYPE)
         .and_then(|v| v.to_str().ok())
@@ -129,7 +130,7 @@ pub async fn tenants(
     ConnectInfo(peer): ConnectInfo<Peer>,
     headers: HeaderMap,
 ) -> Result<Response, ApiError> {
-    require_operator(&app, &headers).await?;
+    require_operator(&app, peer, &headers).await?;
     let tenants = app.db.tenants().await?;
     let detail = json!({ "rows": tenants.len() }).to_string();
     Caller::of(&app, peer, &headers)
@@ -154,7 +155,7 @@ pub async fn create_tenant(
     headers: HeaderMap,
     body: Body,
 ) -> Result<Response, ApiError> {
-    let bytes = operator_json(&app, &headers, body, SMALL_BODY_BYTES).await?;
+    let bytes = operator_json(&app, peer, &headers, body, SMALL_BODY_BYTES).await?;
     let form: NewTenant = parse(&bytes, RefusalCode::TenantInvalid)?;
     let mut problems = intent_domain::problem::Problems::new();
     let name = checked_text(
@@ -189,7 +190,7 @@ pub async fn facts(
     Path(tenant): Path<String>,
     headers: HeaderMap,
 ) -> Result<Response, ApiError> {
-    require_operator(&app, &headers).await?;
+    require_operator(&app, peer, &headers).await?;
     let tenant = tenant_id(&tenant)?;
     require_tenant(&app, tenant).await?;
     let rows = app.db.facts(tenant).await?;
@@ -214,7 +215,7 @@ pub async fn create_fact(
     headers: HeaderMap,
     body: Body,
 ) -> Result<Response, ApiError> {
-    let bytes = operator_json(&app, &headers, body, SMALL_BODY_BYTES).await?;
+    let bytes = operator_json(&app, peer, &headers, body, SMALL_BODY_BYTES).await?;
     let tenant = tenant_id(&tenant)?;
     let form: FactForm = parse(&bytes, RefusalCode::FactInvalid)?;
     let fact = form.validate().map_err(|problems| ApiError::Problems {
@@ -254,7 +255,7 @@ pub async fn approve_fact(
     headers: HeaderMap,
     body: Body,
 ) -> Result<Response, ApiError> {
-    let bytes = operator_json(&app, &headers, body, SMALL_BODY_BYTES).await?;
+    let bytes = operator_json(&app, peer, &headers, body, SMALL_BODY_BYTES).await?;
     let tenant = tenant_id(&tenant)?;
     let fact: FactId = fact.parse().map_err(|_| ApiError::NotFound)?;
     let form: ApprovalForm = parse(&bytes, RefusalCode::ApprovalInvalid)?;
@@ -280,7 +281,7 @@ pub async fn withdraw_fact(
     Path((tenant, fact)): Path<(String, String)>,
     headers: HeaderMap,
 ) -> Result<Response, ApiError> {
-    require_operator(&app, &headers).await?;
+    require_operator(&app, peer, &headers).await?;
     let tenant = tenant_id(&tenant)?;
     let fact: FactId = fact.parse().map_err(|_| ApiError::NotFound)?;
     let caller = Caller::of(&app, peer, &headers);
@@ -299,7 +300,7 @@ pub async fn briefs(
     Path(tenant): Path<String>,
     headers: HeaderMap,
 ) -> Result<Response, ApiError> {
-    require_operator(&app, &headers).await?;
+    require_operator(&app, peer, &headers).await?;
     let tenant = tenant_id(&tenant)?;
     require_tenant(&app, tenant).await?;
     let rows = app.db.briefs(tenant).await?;
@@ -341,7 +342,7 @@ pub async fn create_brief(
     headers: HeaderMap,
     body: Body,
 ) -> Result<Response, ApiError> {
-    let bytes = operator_json(&app, &headers, body, BRIEF_BODY_BYTES).await?;
+    let bytes = operator_json(&app, peer, &headers, body, BRIEF_BODY_BYTES).await?;
     let tenant = tenant_id(&tenant)?;
     let form: BriefForm = parse(&bytes, RefusalCode::BriefInvalid)?;
     let brief = form.validate().map_err(|problems| ApiError::Problems {
@@ -382,7 +383,7 @@ pub async fn revise_brief(
     headers: HeaderMap,
     body: Body,
 ) -> Result<Response, ApiError> {
-    let bytes = operator_json(&app, &headers, body, BRIEF_BODY_BYTES).await?;
+    let bytes = operator_json(&app, peer, &headers, body, BRIEF_BODY_BYTES).await?;
     let tenant = tenant_id(&tenant)?;
     let id: BriefId = brief.parse().map_err(|_| ApiError::NotFound)?;
     let Revision {
@@ -465,7 +466,7 @@ pub async fn brief(
     headers: HeaderMap,
     params: Result<Query<RevisionParam>, QueryRejection>,
 ) -> Result<Response, ApiError> {
-    require_operator(&app, &headers).await?;
+    require_operator(&app, peer, &headers).await?;
     let tenant = tenant_id(&tenant)?;
     let id: BriefId = brief.parse().map_err(|_| ApiError::NotFound)?;
     let Query(params) = params.map_err(|_| ApiError::MalformedBody)?;
@@ -488,7 +489,7 @@ pub async fn spec_check(
     params: Result<Query<RevisionParam>, QueryRejection>,
     body: Body,
 ) -> Result<Response, ApiError> {
-    let bytes = operator_json(&app, &headers, body, SPEC_BODY_BYTES).await?;
+    let bytes = operator_json(&app, peer, &headers, body, SPEC_BODY_BYTES).await?;
     let tenant = tenant_id(&tenant)?;
     let id: BriefId = brief.parse().map_err(|_| ApiError::NotFound)?;
     let Query(params) = params.map_err(|_| ApiError::MalformedBody)?;

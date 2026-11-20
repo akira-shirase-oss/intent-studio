@@ -65,7 +65,7 @@ async fn the_notifier_never_touches_intakes_pool() {
     let health = Health::default();
     health.set_database(true);
     let studio = intent_server::serve::studio(&config).unwrap();
-    let app = App::new(config, intake_db, health, studio);
+    let app = App::new(config, intake_db.clone(), intake_db, health, studio);
     let recorder = Recorder::default();
     let cancel = CancellationToken::new();
     let running = tokio::spawn(

@@ -252,3 +252,73 @@ async fn the_operators_known_address_gets_through_a_distributed_flood() {
     assert_eq!(unknown.status(), 429);
     db.drop_database().await;
 }
+
+/// A flood of correctly-shaped but random session cookies from one address must not turn into
+/// unbounded database writes: the check is charged per address on failure and refunded on a
+/// live session, so the address hears 429 after a small quota — and lead intake, on a pool the
+/// flood cannot see, keeps answering (S2 review: the session check was an unpriced UPDATE on
+/// intake's own pool).
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "needs the stack: scripts/stack.sh up (run by scripts/drills.sh)"]
+async fn a_flood_of_bad_session_cookies_is_limited_and_leaves_intake_alone() {
+    let db = TestDb::create(1).await;
+    let fixture = ProviderFixture::start(Mode::Ok).await;
+    let mut env = drill_env(&db, &fixture.url);
+    env.retain(|(k, _)| k != "INTENT_COOKIE_SECURE");
+    env.push(("INTENT_OPERATOR_PASSWORD_HASH".into(), hash()));
+    env.push(("INTENT_TRUSTED_PROXIES".into(), "127.0.0.1".into()));
+    let server = Server::start(env).await;
+    let client = client();
+    let session = format!("{}/v1/operator/session", server.base);
+
+    let mut statuses = std::collections::HashMap::<u16, usize>::new();
+    for n in 0..40_u32 {
+        let response = client
+            .get(&session)
+            .header("cookie", format!("intent_operator={n:064x}"))
+            .header("x-forwarded-for", "10.80.0.1")
+            .send()
+            .await
+            .unwrap();
+        *statuses.entry(response.status().as_u16()).or_default() += 1;
+    }
+    let refused = statuses.get(&429).copied().unwrap_or(0);
+    let unauthorized = statuses.get(&401).copied().unwrap_or(0);
+    assert!(refused >= 10, "the flood was never limited: {statuses:?}");
+    assert!(
+        unauthorized <= 30,
+        "more session checks than the quota reached the database: {statuses:?}"
+    );
+
+    // Intake never saw the flood: a lead still lands.
+    let lead = client
+        .post(format!(
+            "{}/v1/sites/00000000-0000-4000-9000-000000000000/leads",
+            server.base
+        ))
+        .header("x-forwarded-for", "10.80.0.9")
+        .json(&serde_json::json!({
+            "submission_id": "session-flood-1", "name": "Session Flood", "email": "flood@example.test",
+            "consent": true, "consent_notice": "privacy-v1"
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert!(
+        lead.status().is_success(),
+        "intake starved behind the session flood: {}",
+        lead.status()
+    );
+
+    // A real session on a fresh address is untouched by the flood's drained bucket.
+    let signed = sign_in(
+        &client,
+        &server.base,
+        PASSWORD,
+        "10.80.0.2",
+        "req-flood-signin",
+    )
+    .await;
+    assert_eq!(signed.status(), 200);
+    db.drop_database().await;
+}

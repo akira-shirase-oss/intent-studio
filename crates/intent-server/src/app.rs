@@ -48,6 +48,8 @@ pub struct Inner {
     pub config: Config,
     /// The database.
     pub db: Db,
+    /// The session table's own small pool, so a flood of bad cookies cannot starve intake's.
+    pub sessions: Db,
     /// Liveness and readiness.
     pub health: Health,
     /// Counters.
@@ -60,6 +62,8 @@ pub struct Inner {
     pub site_limiter: Limiter<SiteId>,
     /// Operator sign-in admission: per address, then a global budget for verifications.
     pub sign_in: crate::operator::SignInGate,
+    /// Session-check admission: per address, charged on failure, refunded on a live session.
+    pub session_gate: crate::operator::SessionGate,
     /// Concurrent password hashes (CPU-bound, run off the async workers).
     pub hash_gate: Arc<Semaphore>,
     /// Sites verified to accept leads (the per-site budget is charged only for these).
@@ -91,12 +95,13 @@ impl std::ops::Deref for App {
 
 impl App {
     /// Builds the state.
-    pub fn new(config: Config, db: Db, health: Health, studio: Studio) -> Self {
+    pub fn new(config: Config, db: Db, sessions: Db, health: Health, studio: Studio) -> Self {
         Self(Arc::new(Inner {
             gate: Arc::new(Semaphore::new(config.max_in_flight)),
             address_limiter: Limiter::new(config.address_quota, config.rate_table_entries),
             site_limiter: Limiter::new(config.site_quota, config.rate_table_entries),
             sign_in: crate::operator::SignInGate::new(),
+            session_gate: crate::operator::SessionGate::new(),
             hash_gate: Arc::new(Semaphore::new(2)),
             connections: Arc::new(crate::conn::ConnectionStats::default()),
             sites: crate::sites::SiteDirectory::new(100_000, std::time::Duration::from_secs(60)),
@@ -105,6 +110,7 @@ impl App {
             started: Instant::now(),
             config,
             db,
+            sessions,
             health,
         }))
     }

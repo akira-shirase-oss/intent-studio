@@ -86,6 +86,20 @@ pub fn studio(config: &Config) -> anyhow::Result<crate::app::Studio> {
     })
 }
 
+/// The session table's pool: small, like the prober's (D-047), so a flood of shaped-but-random
+/// cookies turns into bounded writes here — never into intake's pool.
+fn sessions_db(config: &Config) -> anyhow::Result<Db> {
+    Db::connect_lazy(
+        config.database_url.expose(),
+        intent_db::PoolLimits {
+            max_connections: 4,
+            acquire_timeout: Duration::from_secs(1),
+            statement_timeout: Duration::from_secs(1),
+        },
+    )
+    .map_err(|e| anyhow::anyhow!("INTENT_DATABASE_URL: {}", e.summary()))
+}
+
 /// Runs the server until a signal, then drains.
 pub async fn run(config: Config) -> anyhow::Result<ShutdownOutcome> {
     let signal = os_signal().context("installing signal handlers")?;
@@ -103,7 +117,13 @@ pub async fn run(config: Config) -> anyhow::Result<ShutdownOutcome> {
         .with_context(|| format!("binding {}", config.bind))?;
     let health = Health::default();
     let studio = studio(&config)?;
-    let app = App::new(config.clone(), db.clone(), health.clone(), studio);
+    let app = App::new(
+        config.clone(),
+        db.clone(),
+        sessions_db(&config)?,
+        health.clone(),
+        studio,
+    );
 
     let cancel = CancellationToken::new();
     let tasks = TaskTracker::new();

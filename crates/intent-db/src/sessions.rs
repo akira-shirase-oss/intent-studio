@@ -60,13 +60,13 @@ impl Db {
         .map_err(classify)
     }
 
-    /// Ends a session.
-    pub async fn delete_session(&self, digest: &[u8; 32]) -> Result<(), DbError> {
+    /// Ends a session (and reaps any expired ones in passing); whether a row went.
+    pub async fn delete_session(&self, digest: &[u8; 32]) -> Result<bool, DbError> {
         sqlx::query("DELETE FROM operator_sessions WHERE token_digest = $1 OR expires_at <= now()")
             .bind(digest.as_slice())
             .execute(&self.pool)
             .await
-            .map(|_| ())
+            .map(|done| done.rows_affected() > 0)
             .map_err(classify)
     }
 }
