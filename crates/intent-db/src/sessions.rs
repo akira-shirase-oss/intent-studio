@@ -60,13 +60,22 @@ impl Db {
         .map_err(classify)
     }
 
-    /// Ends a session (and reaps any expired ones in passing); whether a row went.
+    /// Ends a session (and reaps any expired ones in passing); whether *the token's* row
+    /// went — reaped rows must not count, or sign-out claims a dead session it never had.
     pub async fn delete_session(&self, digest: &[u8; 32]) -> Result<bool, DbError> {
-        sqlx::query("DELETE FROM operator_sessions WHERE token_digest = $1 OR expires_at <= now()")
+        let mut tx = self.pool.begin().await.map_err(classify)?;
+        let deleted = sqlx::query("DELETE FROM operator_sessions WHERE token_digest = $1")
             .bind(digest.as_slice())
-            .execute(&self.pool)
+            .execute(&mut *tx)
             .await
-            .map(|done| done.rows_affected() > 0)
-            .map_err(classify)
+            .map_err(classify)?
+            .rows_affected()
+            > 0;
+        sqlx::query("DELETE FROM operator_sessions WHERE expires_at <= now()")
+            .execute(&mut *tx)
+            .await
+            .map_err(classify)?;
+        tx.commit().await.map_err(classify)?;
+        Ok(deleted)
     }
 }

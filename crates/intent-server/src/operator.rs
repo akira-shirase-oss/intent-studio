@@ -118,13 +118,19 @@ impl Default for SignInGate {
     }
 }
 
-/// The per-address charge on a session check, with time passed in. A check is a database write
-/// an anonymous client can ask for on every request; the charge is taken before the write and
-/// refunded when the session proves live, so only failed checks are counted — a flood of random
-/// cookies costs its address a bounded number of writes, then hears 429 without touching the db.
+/// The per-address charge on a session check, and a short-TTL memory of digests that proved
+/// live. A check is a database write an anonymous client can ask for on every request; a
+/// digest verified a moment ago answers from memory — before the gate — so a page loading
+/// many routes at once (the Assets grid loads one `<img>` per asset) and a NAT full of
+/// strangers cannot empty the operator's budget. Only a check that reaches the database and
+/// fails is charged; a database error is refunded, a refusal is not.
 pub struct SessionGate {
     per_address: Limiter<AddressKey>,
+    /// digest → the instant it stops being trusted without a fresh check (60 s).
+    verified: std::sync::Mutex<hashlink::LruCache<[u8; 32], u64>>,
 }
+
+const VERIFIED_SESSION_MS: u64 = 60_000;
 
 impl SessionGate {
     /// The D-019 bound, at the sign-in table's size.
@@ -136,7 +142,33 @@ impl SessionGate {
                 ),
                 10_000,
             ),
+            verified: std::sync::Mutex::new(hashlink::LruCache::new(10_000)),
         }
+    }
+
+    /// Whether this digest proved live within the TTL — consulted before any charge.
+    pub fn was_verified(&self, digest: &[u8; 32], now_ms: u64) -> bool {
+        self.verified
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .get(digest)
+            .is_some_and(|&until| until > now_ms)
+    }
+
+    /// A live check: the digest answers from memory for the TTL.
+    pub fn mark_verified(&self, digest: [u8; 32], now_ms: u64) {
+        self.verified
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .insert(digest, now_ms + VERIFIED_SESSION_MS);
+    }
+
+    /// A session is dead the moment it is deleted: drop it from the cache at sign-out.
+    pub fn forget(&self, digest: &[u8; 32]) {
+        self.verified
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .remove(digest);
     }
 
     /// Takes the charge a check costs this address.
@@ -253,21 +285,24 @@ pub async fn sign_in(
     // signed in from in the last 30 days spends its own day-long budget rather than the
     // shared minute one: a flood from elsewhere cannot lock the operator out of their usual
     // place (D-052), and it cannot guess past its own bound either.
+    // The known-address lookup runs on the sessions pool, not intake's: a sign-in flood
+    // already bounded by the address/global gates must not churn intake's 10k table.
     let known = app
-        .db
+        .sessions
         .signed_in_from_recently(&caller.address, KNOWN_ADDRESS_WINDOW)
         .await?;
-    let reserved_known = if known {
-        if let Err(RetryAfter(secs)) = app
+    let reserved_known = if known
+        && app
             .sign_in
             .reserve_known(AddressKey::of(address), app.now_ms())
-        {
-            return Err(ApiError::RateLimited {
-                retry_after_secs: secs,
-            });
-        }
+            .is_ok()
+    {
         Some(AddressKey::of(address))
     } else {
+        // Unknown, or the known-address day budget is spent: the attempt falls back to the
+        // shared minute budget — the same chance an address nobody knows gets. Without the
+        // fallback an attacker on the operator's own address could hold them at 429 by
+        // spending one token per refill tick.
         if let Err(RetryAfter(secs)) = app.sign_in.reserve(app.now_ms()) {
             return Err(ApiError::RateLimited {
                 retry_after_secs: secs,
@@ -360,7 +395,9 @@ pub async fn sign_out(
                 retry_after_secs: secs,
             });
         }
-        if app.sessions.delete_session(&digest(token)).await? {
+        let token_digest = digest(token);
+        if app.sessions.delete_session(&token_digest).await? {
+            app.session_gate.forget(&token_digest);
             app.session_gate.refund(address);
         }
     }
@@ -475,26 +512,39 @@ pub(crate) async fn require_operator(
     let Some(token) = session_token(headers, cookie_name(app)) else {
         return Err(ApiError::Unauthorized);
     };
-    let address = AddressKey::of(crate::intake::client_address_of(
-        headers,
-        peer.ip(),
-        &app.config.trusted_proxies,
-    ));
-    if let Err(RetryAfter(secs)) = app.session_gate.charge(address, app.now_ms()) {
-        return Err(ApiError::RateLimited {
-            retry_after_secs: secs,
-        });
+    let token_digest = digest(token);
+    // A digest verified moments ago needs no database check and no charge — this is what
+    // keeps the operator's page loads and their NAT neighbours out of the failure budget.
+    let verified = app.session_gate.was_verified(&token_digest, app.now_ms());
+    if !verified {
+        let address = AddressKey::of(crate::intake::client_address_of(
+            headers,
+            peer.ip(),
+            &app.config.trusted_proxies,
+        ));
+        if let Err(RetryAfter(secs)) = app.session_gate.charge(address, app.now_ms()) {
+            return Err(ApiError::RateLimited {
+                retry_after_secs: secs,
+            });
+        }
+        match app
+            .sessions
+            .session_is_valid(&token_digest, app.config.session_idle)
+            .await
+        {
+            Ok(true) => {
+                app.session_gate.refund(address);
+                app.session_gate.mark_verified(token_digest, app.now_ms());
+            }
+            Ok(false) => return Err(ApiError::Unauthorized),
+            // A database error is not a failed session: the charge comes back too.
+            Err(e) => {
+                app.session_gate.refund(address);
+                return Err(e.into());
+            }
+        }
     }
-    if app
-        .sessions
-        .session_is_valid(&digest(token), app.config.session_idle)
-        .await?
-    {
-        app.session_gate.refund(address);
-        Ok(())
-    } else {
-        Err(ApiError::Unauthorized)
-    }
+    Ok(())
 }
 
 /// The session token from the `Cookie` header, if it is shaped like one (64 hex digits).
@@ -605,6 +655,27 @@ mod tests {
             (0..20).filter(|_| gate.charge(key(2), 0).is_ok()).count(),
             20
         );
+    }
+
+    #[test]
+    fn a_verified_digest_skips_the_gate_until_its_ttl_or_a_forget() {
+        let gate = SessionGate::new();
+        let digest = [7u8; 32];
+        // The address's whole minute is spent — the verified digest still answers.
+        for _ in 0..20 {
+            gate.charge(key(1), 0).unwrap();
+        }
+        gate.mark_verified(digest, 0);
+        assert!(gate.was_verified(&digest, 0));
+        assert!(gate.was_verified(&digest, 59_999));
+        assert!(!gate.was_verified(&digest, 60_000));
+        gate.mark_verified(digest, 0);
+        gate.forget(&digest);
+        assert!(!gate.was_verified(&digest, 0));
+        // Forgetting leaves the per-address budget where the failures left it.
+        assert!(gate.charge(key(1), 0).is_err());
+        let other = [9u8; 32];
+        assert!(!gate.was_verified(&other, 0));
     }
 
     #[test]
