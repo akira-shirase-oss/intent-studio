@@ -39,6 +39,10 @@ tracing.workspace = true
 tracing-subscriber.workspace = true
 uuid = { workspace = true, features = ["v4", "v7"] }
 
+# PR_SET_DUMPABLE is Linux-only.
+[target.'cfg(target_os = "linux")'.dependencies]
+libc = "0.2"
+
 [dev-dependencies]
 # Test fixtures only (an image to upload); the server itself never links a decoder (A6).
 image.workspace = true

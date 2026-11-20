@@ -48,9 +48,10 @@ RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
 CapabilityBoundingSet=
 AmbientCapabilities=
 SystemCallArchitectures=native
-# The worker lowers its own limits with setrlimit (in @system-service's @resources), so only
-# @privileged is taken away.
-SystemCallFilter=@system-service
+# The worker lowers its own limits with setrlimit and installs its own seccomp filter before
+# it reads a byte; the server calls prctl(PR_SET_DUMPABLE) at start. @system-service carries
+# all three; naming prctl and seccomp keeps the allowance if the group ever narrows.
+SystemCallFilter=@system-service prctl seccomp
 SystemCallFilter=~@privileged
 UMask=0077
 

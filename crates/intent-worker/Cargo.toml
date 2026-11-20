@@ -16,6 +16,11 @@ roxmltree.workspace = true
 serde_json.workspace = true
 skrifa.workspace = true
 
+# The seccomp confinement is Linux-only; on other platforms the rlimits alone stand.
+[target.'cfg(target_os = "linux")'.dependencies]
+libc = "0.2"
+seccompiler = "0.5.0"
+
 [dev-dependencies]
 tokio.workspace = true
 

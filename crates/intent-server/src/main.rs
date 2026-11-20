@@ -71,8 +71,23 @@ fn database() -> anyhow::Result<Db> {
         .map_err(|e| anyhow::anyhow!("INTENT_DATABASE_URL: {}", e.summary()))
 }
 
+/// On Linux the asset worker runs as the same user, and a dumpable process hands every
+/// same-uid reader its `/proc/<pid>/environ` — the database URL, the operator hash — plus its
+/// ptrace and `/proc/<pid>/mem` surface. Going non-dumpable closes all of it to anyone but
+/// root (D-011). A failure means the guarantee did not take; refuse to run.
+#[cfg(target_os = "linux")]
+fn deny_dumpable() -> anyhow::Result<()> {
+    // SAFETY: PR_SET_DUMPABLE takes no pointer arguments.
+    if unsafe { libc::prctl(libc::PR_SET_DUMPABLE, 0, 0, 0, 0) } != 0 {
+        return Err(std::io::Error::last_os_error()).context("prctl(PR_SET_DUMPABLE)");
+    }
+    Ok(())
+}
+
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
+    #[cfg(target_os = "linux")]
+    deny_dumpable()?;
     match Cli::parse().command.unwrap_or(Command::Serve) {
         Command::Serve => {
             let config = Config::from_env().context("loading configuration")?;
@@ -170,3 +185,19 @@ async fn main() -> anyhow::Result<()> {
     }
     Ok(())
 }
+
+#[cfg(test)]
+mod tests {
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn the_process_goes_non_dumpable() {
+        super::deny_dumpable().unwrap();
+        let status = std::fs::read_to_string("/proc/self/status").unwrap();
+        assert!(
+            status.lines().any(|line| line == "Dumpable:\t0"),
+            "Dumpable did not go to 0"
+        );
+    }
+
+}
+

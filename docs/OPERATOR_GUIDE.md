@@ -47,7 +47,7 @@ sudo install -d -m 0755 /opt/intent-studio/bin /opt/intent-studio/workspace
 sudo install -m 0755 bin/intent-server bin/intent-worker /opt/intent-studio/bin/
 sudo cp -R workspace/. /opt/intent-studio/workspace/
 sudo install -d -m 0750 -g intent /etc/intent-studio
-sudo install -m 0640 -g intent deploy/intent-studio.env.example /etc/intent-studio/intent-studio.env
+sudo install -m 0600 deploy/intent-studio.env.example /etc/intent-studio/intent-studio.env
 sudo install -m 0644 deploy/intent-studio.service /etc/systemd/system/intent-studio.service
 sudo systemctl daemon-reload
 ```
@@ -57,9 +57,13 @@ its only writable place, and sandboxes the server and the worker it starts (no n
 privileges, read-only system, no home directories, a system-call filter that still allows the
 worker to lower its own limits).
 
-**Not yet provided, and owed by D-011/D-062:** the worker's own container (read-only root, no
-network). Today the worker runs as a separate process under the unit's sandbox, with an empty
-environment and its own CPU, file-size and memory limits; it shares the service's network.
+The worker it starts confines itself before reading a byte (D-011, D-062): an empty
+environment, its own CPU, file-size, memory and descriptor limits, and on Linux a seccomp
+filter that denies it every socket, every file open by name, exec and new processes for the
+job's life — its only channels are the stdin and stdout pipes the server gave it. The server
+itself goes non-dumpable at start, so its `/proc/<pid>/environ` (which holds the database URL
+and the operator hash) is unreadable to the worker and to anything else running as `intent`;
+the env file stays root-only `0600`, readable only by systemd.
 
 ## First run
 
@@ -86,13 +90,22 @@ environment and its own CPU, file-size and memory limits; it shares the service'
    Then check it; every problem is listed at once, and nothing starts:
 
    ```sh
-   sudo -u intent sh -c 'set -a; . /etc/intent-studio/intent-studio.env; exec /opt/intent-studio/bin/intent-server check-config'
+   sudo systemd-run --wait --pipe -q \
+     -p EnvironmentFile=/etc/intent-studio/intent-studio.env \
+     -p User=intent -p Group=intent \
+     /opt/intent-studio/bin/intent-server check-config
    ```
+
+   (`systemd-run` lets systemd — running as root — read the root-only env file and start the
+   command as `intent`; the file itself stays unreadable to the service user.)
 
 4. **Migrate and start.**
 
    ```sh
-   sudo -u intent sh -c 'set -a; . /etc/intent-studio/intent-studio.env; exec /opt/intent-studio/bin/intent-server migrate'
+   sudo systemd-run --wait --pipe -q \
+     -p EnvironmentFile=/etc/intent-studio/intent-studio.env \
+     -p User=intent -p Group=intent \
+     /opt/intent-studio/bin/intent-server migrate
    sudo systemctl enable --now intent-studio
    journalctl -u intent-studio -n 20          # expect a "listening" line
    curl -s http://127.0.0.1:59400/readyz      # {"ready":true,...}
