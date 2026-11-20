@@ -23,12 +23,15 @@ const ADDRESS_SPACE_BYTES: u64 = 1024 * 1024 * 1024;
 
 /// The syscalls a job needs, allowed on Linux (D-011). An allow-list rather than a deny
 /// list: every number not named here — sockets, file opens by name, exec, new processes,
-/// namespaces, xattrs, rlimit/priority changes, fcntl signal ownership, pidfd, io_uring —
-/// answers EPERM. x32 needs no separate check: an x32 call carries a number with the x32
-/// bit set, and no such number is on this list, so the default refusal takes it.
-#[cfg(target_os = "linux")]
+/// namespaces, xattrs, `rlimit`/priority changes, `fcntl` signal ownership, `pidfd`,
+/// `io_uring` — kills the job. `x32` needs no separate check: an `x32` call carries a
+/// number with the `x32` bit set, and no such number is on this list, so the default
+/// kill takes it.
+/// `libc::SYS_*` constants are `c_long`, which is `i64` only on 64-bit targets; this list
+/// is built for them and a 32-bit target gets no filter at all (see below).
+#[cfg(all(target_os = "linux", target_pointer_width = "64"))]
 fn allowed_syscalls() -> Vec<i64> {
-    let allowed: Vec<i64> = [
+    vec![
         // The job's whole I/O: read the job on stdin, write the framed answer on stdout.
         libc::SYS_read,
         libc::SYS_readv,
@@ -58,41 +61,56 @@ fn allowed_syscalls() -> Vec<i64> {
         libc::SYS_exit,
         libc::SYS_exit_group,
     ]
-    .into_iter()
-    .map(i64::from)
-    .collect();
-    allowed
 }
 
 /// The syscall filter, installed before a byte of input is read. Only the named calls get
-/// Allow; everything else — matched or unmatched — answers EPERM rather than a kill, so a
-/// legitimate library path that tries one fails visibly instead of crashing mid-job. The
-/// filter survives exec (itself refused), so there is no stepping out.
-#[cfg(target_os = "linux")]
+/// Allow; everything else — sockets, opens, exec, the x32 bit set — kills the job, so a
+/// probe surfaces as a crash the driver reports, never as a quiet errno the job could try
+/// to work around. The filter survives exec (itself refused), so there is no stepping out.
+#[cfg(all(target_os = "linux", target_pointer_width = "64"))]
 fn confine_syscalls() -> std::io::Result<()> {
     use seccompiler::{SeccompAction, SeccompFilter, TargetArch};
     let failed = || std::io::Error::other("seccomp confinement failed");
-    // An unprivileged process may filter itself only once it can never gain privileges.
-    // SAFETY: PR_SET_NO_NEW_PRIVS takes no pointer arguments; the flag survives exec.
-    if unsafe { libc::prctl(libc::PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0) } != 0 {
-        return Err(std::io::Error::last_os_error());
-    }
-    let rules: std::collections::BTreeMap<i64, Vec<seccompiler::SeccompRule>> = allowed_syscalls()
-        .into_iter()
-        .map(|call| (call, Vec::new()))
-        .collect();
+    // `apply_filter` sets PR_SET_NO_NEW_PRIVS before loading the program — an
+    // unprivileged process may filter itself only once it can never gain privileges.
+    let mut rules: std::collections::BTreeMap<i64, Vec<seccompiler::SeccompRule>> =
+        allowed_syscalls()
+            .into_iter()
+            .map(|call| (call, Vec::new()))
+            .collect();
+    // mmap is allowed only without PROT_EXEC: the job decodes, it never runs generated
+    // code. seccompiler arg 2 of mmap is the `prot` flags word.
+    let no_exec = seccompiler::SeccompCondition::new(
+        2,
+        seccompiler::SeccompCmpArgLen::Dword,
+        seccompiler::SeccompCmpOp::MaskedEq(u64::try_from(libc::PROT_EXEC).unwrap_or(u64::MAX)),
+        0,
+    )
+    .map_err(|_| failed())?;
+    rules.insert(
+        libc::SYS_mmap,
+        vec![seccompiler::SeccompRule::new(vec![no_exec]).map_err(|_| failed())?],
+    );
     let arch = TargetArch::try_from(std::env::consts::ARCH).map_err(|_| failed())?;
-    let eperm = u32::try_from(libc::EPERM).map_err(|_| failed())?;
-    // Rules hit Allow; any other number — sockets, opens, exec, the x32 bit set — hits Errno.
+    // Rules hit Allow; any other number — sockets, opens, exec, the x32 bit set — kills.
     let filter = SeccompFilter::new(
         rules,
-        SeccompAction::Errno(eperm),
+        SeccompAction::KillProcess,
         SeccompAction::Allow,
         arch,
     )
     .map_err(|_| failed())?;
     let program = seccompiler::BpfProgram::try_from(filter).map_err(|_| failed())?;
     seccompiler::apply_filter(&program).map_err(|_| failed())
+}
+
+/// A 32-bit Linux cannot express this filter (syscall numbers there are not `i64`), so
+/// rather than run unconfined the job refuses to start.
+#[cfg(all(target_os = "linux", not(target_pointer_width = "64")))]
+fn confine_syscalls() -> std::io::Result<()> {
+    Err(std::io::Error::other(
+        "seccomp confinement is only built for 64-bit kernels",
+    ))
 }
 
 fn confine() -> std::io::Result<()> {
@@ -175,12 +193,14 @@ fn main() -> ExitCode {
     }
 }
 
-#[cfg(all(test, target_os = "linux"))]
+#[cfg(all(test, target_os = "linux", target_pointer_width = "64"))]
 mod tests {
     use super::{allowed_syscalls, confine};
+    use std::io::Write as _;
+    use std::os::unix::process::ExitStatusExt as _;
 
-    /// Marker env var: the confined child re-runs exactly this test with it set, and the test
-    /// body is then the probe — apply the filter, try the two calls, print the verdicts, exit.
+    /// Marker env var: a child re-runs `confined_child_probes` with it set to a probe name
+    /// — the test body applies the filter, performs that one call, then reports.
     const CHILD_FLAG: &str = "INTENT_WORKER_CONFINED_CHILD";
 
     #[test]
@@ -205,7 +225,7 @@ mod tests {
             libc::SYS_exit_group,
         ] {
             assert!(
-                allowed.contains(&i64::from(call)),
+                allowed.contains(&call),
                 "syscall {call} a job needs is not allowed"
             );
         }
@@ -221,7 +241,7 @@ mod tests {
             libc::SYS_clone3,
         ] {
             assert!(
-                !allowed.contains(&i64::from(call)),
+                !allowed.contains(&call),
                 "escape syscall {call} must not be allowed"
             );
         }
@@ -235,60 +255,67 @@ mod tests {
         );
     }
 
-    /// The probe half of the confinement proof: inside the confined child, a socket and an
-    /// open must answer EPERM while the allowed calls keep working. Exits directly so the
-    /// harness never needs a refused call.
+    /// The probe half of the confinement proof: a confined child performs exactly one call.
+    /// A refused call kills it inside the attempt (the filter's action is `KillProcess`); the
+    /// allowed probe reports its calls still work.
     #[test]
     fn confined_child_probes() {
-        if std::env::var(CHILD_FLAG).is_err() {
+        let Ok(probe) = std::env::var(CHILD_FLAG) else {
             return;
-        }
-        confine().unwrap_or_else(|e| panic!("confinement refused to install: {e}"));
-        let errno_of = |rc: i32| {
-            if rc == -1 {
-                unsafe { *libc::__errno_location() }
-            } else {
-                0
-            }
         };
-        let socket_errno = errno_of(unsafe { libc::socket(libc::AF_INET, libc::SOCK_STREAM, 0) });
-        let open_errno = errno_of(unsafe {
-            libc::openat(libc::AT_FDCWD, c"/etc/passwd".as_ptr(), libc::O_RDONLY)
-        });
-        // Allowed calls still work: randomness and a write to the inherited pipe.
-        let mut byte = [0u8; 1];
-        let random_ok = unsafe { libc::getrandom(byte.as_mut_ptr().cast(), 1, 0) } == 1;
-        let line =
-            format!("CONFINED socket={socket_errno} open={open_errno} getrandom_ok={random_ok}\n");
-        unsafe {
-            libc::write(1, line.as_ptr().cast(), line.len());
+        confine().unwrap_or_else(|e| panic!("confinement refused to install: {e}"));
+        match probe.as_str() {
+            "socket" => {
+                // `bind` opens a socket before anything else; if the call returns at
+                // all the filter did not kill it — report that as a clean exit.
+                let _ = std::net::TcpListener::bind("127.0.0.1:0");
+                std::process::exit(0);
+            }
+            "openat" => {
+                let _ = std::fs::File::open("/etc/passwd");
+                std::process::exit(0);
+            }
+            "allowed" => {
+                // The calls a job keeps: randomness and a write to the inherited pipe.
+                let _random = std::hash::RandomState::new();
+                std::io::stdout()
+                    .write_all(b"CONFINED\n")
+                    .unwrap_or_else(|e| panic!("pipe write failed: {e}"));
+                std::process::exit(0);
+            }
+            other => panic!("unknown probe {other}"),
         }
-        let proved = socket_errno == libc::EPERM && open_errno == libc::EPERM && random_ok;
-        std::process::exit(if proved { 0 } else { 1 });
     }
 
-    /// The parent half: spawn this same test binary confined and check its report — deleting
-    /// `confine()` or `deny_dumpable` must fail this, a list check alone cannot.
+    /// The parent half: a refused call must kill the child, the allowed set must let it
+    /// finish — deleting `confine()` fails this, a list check alone cannot.
     #[test]
-    fn the_filter_is_installed_and_refuses_escape() {
+    fn the_filter_kills_escape_and_allows_the_job() {
         if std::env::var(CHILD_FLAG).is_ok() {
             return;
         }
+        for probe in ["socket", "openat"] {
+            let status = std::process::Command::new(std::env::current_exe().unwrap())
+                .args(["confined_child_probes", "--test-threads=1"])
+                .env(CHILD_FLAG, probe)
+                .status()
+                .unwrap();
+            assert!(
+                status.signal().is_some(),
+                "{probe} probe was not killed by the filter: {status:?}"
+            );
+        }
         let output = std::process::Command::new(std::env::current_exe().unwrap())
             .args(["confined_child_probes", "--test-threads=1"])
-            .env(CHILD_FLAG, "1")
+            .env(CHILD_FLAG, "allowed")
             .output()
             .unwrap();
-        let stdout = String::from_utf8_lossy(&output.stdout);
         assert!(
             output.status.success(),
-            "confined child failed: status {:?}, stdout {stdout}, stderr {}",
+            "allowed probe failed: {:?} {}",
             output.status.code(),
             String::from_utf8_lossy(&output.stderr)
         );
-        assert!(
-            stdout.contains("socket=1 open=1 getrandom_ok=true"),
-            "unexpected confined report: {stdout}"
-        );
+        assert_eq!(String::from_utf8_lossy(&output.stdout), "CONFINED\n");
     }
 }
