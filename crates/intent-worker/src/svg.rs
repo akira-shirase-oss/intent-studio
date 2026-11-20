@@ -18,6 +18,11 @@ pub const MAX_SVG_BYTES: usize = 2 * 1024 * 1024;
 pub const MAX_NODES: u32 = 100_000;
 /// Deepest element nesting kept.
 pub const MAX_DEPTH: usize = 64;
+/// Deepest a `use` may reach through references; a longer chain never finishes expanding
+/// cheaply enough (a doubling chain's cost is 2^depth).
+pub const MAX_USE_DEPTH: u32 = 8;
+/// Most `use` expansions the document may produce in all.
+pub const MAX_USE_EXPANSIONS: u32 = 512;
 
 const SVG_NS: &str = "http://www.w3.org/2000/svg";
 const XLINK_NS: &str = "http://www.w3.org/1999/xlink";
@@ -156,6 +161,7 @@ pub fn sanitize(input: &[u8]) -> Result<Sanitized, WorkerRefusal> {
     if root.tag_name().name() != "svg" || root.tag_name().namespace() != Some(SVG_NS) {
         return Err(WorkerRefusal::TypeMismatch);
     }
+    check_use_expansion(&root)?;
     let mut writer = Writer {
         out: String::with_capacity(trimmed.len()),
         removed: 0,
@@ -201,8 +207,29 @@ fn whole(value: f64) -> Option<u32> {
     })
 }
 
+/// The functions an attribute value may invoke (transforms and paints); `url` is the only one
+/// that can fetch, and it is pinned to a same-document fragment by the check below.
+const FUNCTIONS: &[&str] = &[
+    "url",
+    "translate",
+    "scale",
+    "rotate",
+    "skewx",
+    "skewy",
+    "matrix",
+    "rgb",
+    "rgba",
+    "hsl",
+    "hsla",
+];
+
 /// Whether an attribute value could load, run or reference something outside the document.
 fn value_is_safe(value: &str) -> bool {
+    // A CSS escape can spell anything the checks below look for (`\75rl(` is `url(`), so the
+    // escape character itself is refused rather than unescaped into a bigger check surface.
+    if value.contains('\\') {
+        return false;
+    }
     let lower: String = value
         .chars()
         .filter(|c| !c.is_whitespace() && !c.is_control())
@@ -216,17 +243,108 @@ fn value_is_safe(value: &str) -> bool {
     {
         return false;
     }
-    // `url(...)` is allowed only as a same-document fragment: `url(#id)`.
+    // Every `(` opens a function: the name before it must be on the short list, and `url` must
+    // name a same-document fragment — `url(#id)`, optionally quoted.
     let mut rest = lower.as_str();
-    while let Some(at) = rest.find("url(") {
-        let after = &rest[at + 4..];
-        let target = after.trim_start_matches(['"', '\'']);
-        if !target.starts_with('#') {
+    while let Some(open) = rest.find('(') {
+        let name_start = rest[..open]
+            .rfind(|c: char| !(c.is_ascii_alphanumeric() || c == '-'))
+            .map_or(0, |i| i + 1);
+        let name = &rest[..open][name_start..];
+        if !FUNCTIONS.contains(&name) {
             return false;
         }
-        rest = after;
+        if name == "url" {
+            let target = rest[open + 1..].trim_start_matches(['"', '\'']);
+            if !target.starts_with('#') {
+                return false;
+            }
+        }
+        rest = &rest[open + 1..];
     }
     true
+}
+
+/// A `use` element's target, if it has a same-document fragment reference that resolves.
+fn use_target<'a, 'input>(
+    node: Node<'a, 'input>,
+    by_id: &std::collections::HashMap<&'input str, Node<'a, 'input>>,
+) -> Option<Node<'a, 'input>> {
+    let tag = node.tag_name();
+    if !(node.is_element() && tag.name() == "use" && tag.namespace() == Some(SVG_NS)) {
+        return None;
+    }
+    let href = node
+        .attributes()
+        .find_map(|attribute| match attribute.namespace() {
+            None | Some(XLINK_NS) if attribute.name() == "href" => Some(attribute.value()),
+            _ => None,
+        })?;
+    if !is_fragment(href) {
+        return None;
+    }
+    by_id.get(&href[1..]).copied()
+}
+
+/// `use` chains are bounded before a byte is written: a renderer expands each reference,
+/// and a chain of `use`-inside-`use` (or a cycle) makes that expansion exponential — or
+/// infinite. The cost of one element is itself plus the cost of every use inside it;
+/// a document over the depth or total bound is refused.
+fn check_use_expansion(root: &Node<'_, '_>) -> Result<(), WorkerRefusal> {
+    use std::collections::{HashMap, HashSet};
+    let mut by_id: HashMap<&str, Node<'_, '_>> = HashMap::new();
+    for node in root.descendants() {
+        if node.is_element()
+            && let Some(id) = node.attribute("id")
+        {
+            by_id.entry(id).or_insert(node);
+        }
+    }
+    let mut memo = HashMap::new();
+    let mut expansions = 0_u32;
+    for node in root.descendants() {
+        if let Some(target) = use_target(node, &by_id) {
+            let (more, height) = use_cost(target, &by_id, &mut memo, &mut HashSet::new())?;
+            if height > MAX_USE_DEPTH {
+                return Err(WorkerRefusal::TooLarge);
+            }
+            expansions = expansions.saturating_add(more);
+            if expansions > MAX_USE_EXPANSIONS {
+                return Err(WorkerRefusal::TooLarge);
+            }
+        }
+    }
+    Ok(())
+}
+
+/// One node's answer for [`check_use_expansion`]: (its expansion cost, the longest chain
+/// below it). Both are absolute, so memoizing them is sound — `g` costs the same whether
+/// it is reached first or at the end of a chain.
+fn use_cost<'a, 'input>(
+    node: Node<'a, 'input>,
+    by_id: &std::collections::HashMap<&'input str, Node<'a, 'input>>,
+    memo: &mut std::collections::HashMap<roxmltree::NodeId, (u32, u32)>,
+    visiting: &mut std::collections::HashSet<roxmltree::NodeId>,
+) -> Result<(u32, u32), WorkerRefusal> {
+    if visiting.contains(&node.id()) {
+        return Err(WorkerRefusal::TooLarge);
+    }
+    if let Some(&cached) = memo.get(&node.id()) {
+        return Ok(cached);
+    }
+    visiting.insert(node.id());
+    let mut total = 1_u32;
+    let mut height = 1_u32;
+    for descendant in node.descendants() {
+        if let Some(target) = use_target(descendant, by_id) {
+            let (expansions, chain) = use_cost(target, by_id, memo, visiting)?;
+            total = total.saturating_add(expansions);
+            height = height.max(chain.saturating_add(1));
+        }
+    }
+    visiting.remove(&node.id());
+    memo.insert(node.id(), (total, height));
+    Ok((total, height))
 }
 
 /// A same-document reference: `#` followed by an id's characters.
@@ -262,8 +380,7 @@ impl Writer {
             let key = attribute.name();
             let value = attribute.value();
             let keep = match attribute.namespace() {
-                None if key == "href" => HREF_ELEMENTS.contains(&name) && is_fragment(value),
-                Some(XLINK_NS) if key == "href" => {
+                None | Some(XLINK_NS) if key == "href" => {
                     HREF_ELEMENTS.contains(&name) && is_fragment(value)
                 }
                 None => ATTRIBUTES.contains(&key) && value_is_safe(value) && value.len() <= 100_000,
@@ -304,5 +421,81 @@ fn escape(out: &mut String, text: &str, attribute: bool) {
             c if c.is_control() && !matches!(c, '\n' | '\t') => {}
             c => out.push(c),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn doc(inner: &str) -> Vec<u8> {
+        format!("<svg xmlns=\"{SVG_NS}\">{inner}</svg>").into_bytes()
+    }
+
+    fn sanitized(inner: &str) -> String {
+        sanitize(&doc(inner)).unwrap().svg
+    }
+
+    #[test]
+    fn a_css_escape_cannot_disguise_a_fetch_or_a_handler() {
+        // \75 decodes to `u`: what a stylesheet reads as url(https://…) the literal scan
+        // missed. The attribute must not survive.
+        assert!(
+            !sanitized("<rect fill=\"\\75rl(https://beacon.example/x.png)\"/>")
+                .contains("https://"),
+            "an escaped url( reached the output"
+        );
+        // The same trick on the scheme: \6a avascript:.
+        assert!(
+            !sanitized("<use href=\"#a\" fill=\"\\6a avascript:alert(1)\"/>").contains("vascript"),
+            "an escaped scheme reached the output"
+        );
+        // A backslash is never part of a legitimate paint value at all: none survives.
+        assert!(
+            !sanitized("<rect fill=\"u\\72 l(#a)\"/>").contains('\\'),
+            "a backslash reached the output"
+        );
+    }
+
+    #[test]
+    fn parentheses_only_survive_inside_a_named_function() {
+        // The allowed forms still pass.
+        let out = sanitized(
+            "<defs><linearGradient id=\"g\"/></defs>\
+             <rect fill=\"url(#g)\" stroke=\"rgb(1, 2, 3)\" transform=\"translate(10, 20) rotate(5)\"/>",
+        );
+        assert!(out.contains("fill=\"url(#g)\""));
+        assert!(out.contains("stroke=\"rgb(1, 2, 3)\""));
+        assert!(out.contains("translate(10, 20) rotate(5)"));
+        // A url() that is not a fragment is dropped, and so is any other unknown function.
+        assert!(!sanitized("<rect fill=\"url(https://b.example/)\"/>").contains("https://"));
+        assert!(!sanitized("<rect fill=\"expression(alert(1))\"/>").contains("expression"));
+        assert!(
+            !sanitized("<rect fill=\"-moz-image-rect(url(#g),0,0,1,1)\"/>").contains("image-rect")
+        );
+    }
+
+    #[test]
+    fn use_chains_are_bounded() {
+        // A chain nine references deep refuses: the document expands past the bound.
+        let mut chain = String::from("<defs><rect id=\"a\" width=\"1\" height=\"1\"/>");
+        for i in 0..9 {
+            let from = char::from(b'a' + i);
+            let to = char::from(b'a' + i + 1);
+            let _ = write!(chain, "<g id=\"{to}\"><use href=\"#{from}\"/></g>");
+        }
+        chain.push_str("</defs><use href=\"#j\"/>");
+        assert_eq!(
+            sanitize(&doc(&chain)),
+            Err(WorkerRefusal::TooLarge),
+            "a nine-deep use chain passed"
+        );
+        // A cycle never finishes expanding: refused too.
+        let cycle = "<defs><g id=\"x\"><use href=\"#x\"/></g></defs><use href=\"#x\"/>";
+        assert_eq!(sanitize(&doc(cycle)), Err(WorkerRefusal::TooLarge));
+        // A modest chain still passes.
+        let ok = "<defs><g id=\"p\"><rect/></g><g id=\"q\"><use href=\"#p\"/></g></defs>\
+                  <use href=\"#q\"/><use href=\"#q\"/>";
+        assert!(sanitize(&doc(ok)).is_ok(), "a two-deep use chain refused");
     }
 }
