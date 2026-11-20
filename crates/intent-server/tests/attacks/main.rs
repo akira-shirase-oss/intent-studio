@@ -21,4 +21,9 @@
 #[path = "../support/mod.rs"]
 mod support;
 
+mod auth;
+mod bodies;
 mod fuzz;
+mod headers;
+mod replay;
+mod ssrf;
