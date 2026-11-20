@@ -16,10 +16,10 @@ use axum::{
 use intent_db::{NewLead, StoreOutcome};
 use intent_domain::{
     ids::{LeadId, OutboxId, SiteId},
-    lead::{LeadForm, Rejection},
+    lead::{ClientSubmissionId, LeadForm, Rejection},
     limits::MAX_BODY_BYTES,
     ratelimit::{AddressKey, RetryAfter, client_address},
-    submission::{fingerprint, keys_for},
+    submission::{StoredKey, SubmissionKeys, fingerprint, keys_for},
 };
 use serde::Serialize;
 use std::net::IpAddr;
@@ -66,7 +66,12 @@ pub async fn submit(
         return Err(ApiError::Unavailable(None));
     }
 
-    let address = client_address_of(&headers, peer.ip(), &app.config.trusted_proxies);
+    let address = client_address_of(
+        &headers,
+        peer.ip(),
+        &app.config.trusted_proxies,
+        app.config.trust_any_forwarded(),
+    );
     let now = app.now_ms();
     if let Err(RetryAfter(secs)) = app.address_limiter.check(AddressKey::of(address), now) {
         Metrics::inc(&metrics.intake_rate_limited_address_total);
@@ -105,7 +110,17 @@ pub async fn submit(
 
     let received_at = OffsetDateTime::now_utc();
     let content = fingerprint(&lead);
-    let keys = keys_for(site, &lead, &content, received_at.unix_timestamp());
+    let mut keys = keys_for(site, &lead, &content, received_at.unix_timestamp());
+    if app.config.mutation_is(crate::config::Mutation::NoLeadDedup) {
+        // The proof's seam: a fresh key per submission means the `(site, key)` unique
+        // constraint can never fire — every retry is stored as its own lead.
+        if let Ok(id) = ClientSubmissionId::parse(&format!("m{}", Uuid::now_v7().simple())) {
+            keys = SubmissionKeys {
+                primary: StoredKey::client(&id),
+                previous_window: None,
+            };
+        }
+    }
     let new = NewLead {
         id: LeadId::from_uuid(Uuid::now_v7()),
         outbox_id: OutboxId::from_uuid(Uuid::now_v7()),
@@ -175,7 +190,24 @@ fn acknowledge(
 /// from the right under the trusted-proxy rule. A proxy may add its own line instead of
 /// appending to the client's, so reading only the first line would let a client pick its own
 /// address. A line that is not text makes the header untrustworthy: the peer is used.
-pub fn client_address_of(headers: &HeaderMap, peer: IpAddr, trusted: &[IpAddr]) -> IpAddr {
+pub fn client_address_of(
+    headers: &HeaderMap,
+    peer: IpAddr,
+    trusted: &[IpAddr],
+    trust_any: bool,
+) -> IpAddr {
+    if trust_any {
+        // Mutation seam: believe the client-supplied hop outright, so address rotation
+        // moves the limiter key — the attack this proves is the header being trusted.
+        for line in headers.get_all("x-forwarded-for") {
+            if let Ok(text) = line.to_str()
+                && let Some(first) = text.split(',').next()
+                && let Ok(ip) = first.trim().parse::<IpAddr>()
+            {
+                return ip;
+            }
+        }
+    }
     let mut joined = String::new();
     for line in headers.get_all("x-forwarded-for") {
         let Ok(text) = line.to_str() else {
@@ -274,15 +306,18 @@ mod tests {
         let proxy: IpAddr = "127.0.0.1".parse().unwrap();
         let real: IpAddr = "10.60.0.1".parse().unwrap();
         let two = headers(&[b"10.50.0.9", b"10.60.0.1"]);
-        assert_eq!(client_address_of(&two, proxy, &[proxy]), real);
+        assert_eq!(client_address_of(&two, proxy, &[proxy], false), real);
         let one = headers(&[b"10.50.0.9, 10.60.0.1"]);
-        assert_eq!(client_address_of(&one, proxy, &[proxy]), real);
-        assert_eq!(client_address_of(&HeaderMap::new(), proxy, &[proxy]), proxy);
+        assert_eq!(client_address_of(&one, proxy, &[proxy], false), real);
+        assert_eq!(
+            client_address_of(&HeaderMap::new(), proxy, &[proxy], false),
+            proxy
+        );
         // A line that is not text: the header is not believed.
         let garbage = headers(&[b"10.50.0.9", b"\xff\xfe"]);
-        assert_eq!(client_address_of(&garbage, proxy, &[proxy]), proxy);
+        assert_eq!(client_address_of(&garbage, proxy, &[proxy], false), proxy);
         // An untrusted peer's header is ignored altogether.
         let stranger: IpAddr = "203.0.113.7".parse().unwrap();
-        assert_eq!(client_address_of(&two, stranger, &[proxy]), stranger);
+        assert_eq!(client_address_of(&two, stranger, &[proxy], false), stranger);
     }
 }

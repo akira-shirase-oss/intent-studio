@@ -60,6 +60,30 @@ pub enum Profile {
     Development,
 }
 
+/// A protection switched off on purpose — the mutation-proof seam (`INTENT_MUTATION`).
+/// Every attack test earns its place by going red without the guard it exercises; these
+/// are those guards. Parsing refuses the variable outside development, so a production
+/// boot can never carry one.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Mutation {
+    /// `require_operator` passes every request, cookie or not.
+    NoSessionCheck,
+    /// `sign_out` skips the row delete and still claims success.
+    NoSessionDelete,
+    /// `client_address_of` believes the client-supplied forwarded-for hop.
+    TrustAnyForwarded,
+    /// `/metrics` answers without its token.
+    NoMetricsToken,
+    /// The request timeout and body cap are effectively unbounded.
+    NoRequestBound,
+    /// JSON-only and the no-form CSRF marker pass anything.
+    NoContentType,
+    /// Snapshot fetches skip the egress per-address policy.
+    NoEgressGuard,
+    /// Every lead insert dedupes nothing.
+    NoLeadDedup,
+}
+
 /// Which notification provider adapter to use.
 #[derive(Debug, Clone)]
 pub enum ProviderConfig {
@@ -121,6 +145,9 @@ pub struct StudioConfig {
 pub struct Config {
     /// `INTENT_PROFILE`: `production` (default) or `development`.
     pub profile: Profile,
+    /// `INTENT_MUTATION`: the guard this boot leaves off — development only (see
+    /// [`Mutation`]); the attack suite's mutation proof needs a boot to answer vulnerable.
+    pub mutation: Option<Mutation>,
     /// Listen address.
     pub bind: SocketAddr,
     /// PostgreSQL URL (contains the password).
@@ -290,6 +317,17 @@ fn http_target_is_local(url: &url::Url) -> bool {
 }
 
 impl Config {
+    /// Whether this boot carries a given mutation (never outside development — the parser
+    /// refuses the variable there).
+    pub fn mutation_is(&self, mutation: Mutation) -> bool {
+        self.mutation == Some(mutation)
+    }
+
+    /// Whether forwarded-for headers are believed outright (mutation proof only).
+    pub fn trust_any_forwarded(&self) -> bool {
+        self.mutation_is(Mutation::TrustAnyForwarded)
+    }
+
     /// Reads the configuration through `lookup` (the process environment in production, a map
     /// in tests).
     #[expect(
@@ -311,6 +349,28 @@ impl Config {
                 Profile::Production
             }
         };
+        let mutation = match env.raw("INTENT_MUTATION").as_deref().map(str::trim) {
+            None => None,
+            Some("no-session-check") => Some(Mutation::NoSessionCheck),
+            Some("no-session-delete") => Some(Mutation::NoSessionDelete),
+            Some("trust-any-forwarded") => Some(Mutation::TrustAnyForwarded),
+            Some("no-metrics-token") => Some(Mutation::NoMetricsToken),
+            Some("no-request-bound") => Some(Mutation::NoRequestBound),
+            Some("no-content-type") => Some(Mutation::NoContentType),
+            Some("no-egress-guard") => Some(Mutation::NoEgressGuard),
+            Some("no-lead-dedup") => Some(Mutation::NoLeadDedup),
+            Some(other) => {
+                env.problems.push(format!(
+                    "INTENT_MUTATION: expected one of no-session-check, no-session-delete, trust-any-forwarded, no-metrics-token, no-request-bound, no-content-type, no-egress-guard, no-lead-dedup; got {other:?}"
+                ));
+                None
+            }
+        };
+        if mutation.is_some() && profile != Profile::Development {
+            env.problems.push(
+                "INTENT_MUTATION switches off protections and exists only under INTENT_PROFILE=development".into(),
+            );
+        }
         let bind = env.parse("INTENT_BIND", SocketAddr::from(([127, 0, 0, 1], 59400)));
         let database_url = env.secret("INTENT_DATABASE_URL");
         if database_url.is_none() && env.raw("INTENT_DATABASE_URL").is_none() {
@@ -604,6 +664,7 @@ impl Config {
         match database_url {
             Some(database_url) if env.problems.is_empty() => Ok(Self {
                 profile,
+                mutation,
                 bind,
                 database_url,
                 db,

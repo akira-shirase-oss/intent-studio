@@ -295,7 +295,11 @@ pub async fn withdraw_fact(
     require_operator(&app, peer, &headers).await?;
     // Withdrawal is permanent; a foreign form could reach this POST with the session cookie
     // but cannot mark it as the workspace's fetch does.
-    if !csrf_ok(&headers) {
+    if !csrf_ok(&headers)
+        && !app
+            .config
+            .mutation_is(crate::config::Mutation::NoContentType)
+    {
         return Err(ApiError::UnsupportedMediaType);
     }
     let tenant = tenant_id(&tenant)?;

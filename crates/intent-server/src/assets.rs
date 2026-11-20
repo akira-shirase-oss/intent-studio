@@ -421,7 +421,17 @@ pub async fn fetch_snapshot(
         .ok_or(ApiError::NotFound)?;
 
     // Outside any transaction (invariant 2): the guard decides, then the outcome is recorded.
-    let outcome = app.studio.egress.fetch(&reference.url, Purpose::Page).await;
+    let outcome = if app
+        .config
+        .mutation_is(crate::config::Mutation::NoEgressGuard)
+    {
+        app.studio
+            .egress
+            .fetch_unchecked(&reference.url, Purpose::Page)
+            .await
+    } else {
+        app.studio.egress.fetch(&reference.url, Purpose::Page).await
+    };
     let id = SnapshotId::from_uuid(Uuid::now_v7());
     let caller = Caller::of(&app, peer, &headers);
     let (snapshot, refusal) = match outcome {

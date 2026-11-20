@@ -249,18 +249,33 @@ impl<R: Resolve, C: Connect> Guard<R, C> {
 
     /// Fetches `raw`, following redirects, all under the guard's rules and deadline.
     pub async fn fetch(&self, raw: &str, purpose: Purpose) -> Result<Fetched, Refusal> {
-        tokio::time::timeout(self.deadline, self.fetch_unbounded(raw, purpose))
+        tokio::time::timeout(self.deadline, self.fetch_unbounded(raw, purpose, true))
             .await
             .unwrap_or(Err(Refusal::Timeout))
     }
 
-    async fn fetch_unbounded(&self, raw: &str, purpose: Purpose) -> Result<Fetched, Refusal> {
+    /// The same fetch with the per-address policy skipped — it exists so the mutation
+    /// proof can show the SSRF attack landing without the guard. Production callers use
+    /// [`fetch`](Self::fetch); nothing else may call this.
+    #[doc(hidden)]
+    pub async fn fetch_unchecked(&self, raw: &str, purpose: Purpose) -> Result<Fetched, Refusal> {
+        tokio::time::timeout(self.deadline, self.fetch_unbounded(raw, purpose, false))
+            .await
+            .unwrap_or(Err(Refusal::Timeout))
+    }
+
+    async fn fetch_unbounded(
+        &self,
+        raw: &str,
+        purpose: Purpose,
+        check: bool,
+    ) -> Result<Fetched, Refusal> {
         let mut url = Url::parse(raw).map_err(|_| Refusal::InvalidUrl)?;
         let mut redirects = Vec::new();
         loop {
             // `_connection` keeps the connection's task alive while the body is read and aborts it
             // when this iteration ends, whatever happened.
-            let (address, response, _connection) = self.request(&url).await?;
+            let (address, response, _connection) = self.request(&url, check).await?;
             let status = response.status();
             if is_redirect(status) {
                 if redirects.len() >= usize::from(MAX_REDIRECTS) {
@@ -319,6 +334,7 @@ impl<R: Resolve, C: Connect> Guard<R, C> {
     async fn request(
         &self,
         url: &Url,
+        check: bool,
     ) -> Result<
         (
             SocketAddr,
@@ -359,8 +375,10 @@ impl<R: Resolve, C: Connect> Guard<R, C> {
         }
         // The whole answer is judged: one private address among public ones is a refusal, not a
         // choice.
-        for ip in &addresses {
-            policy::check(*ip).map_err(Refusal::AddressForbidden)?;
+        if check {
+            for ip in &addresses {
+                policy::check(*ip).map_err(Refusal::AddressForbidden)?;
+            }
         }
         let mut stream = None;
         for ip in addresses.iter().take(MAX_CONNECT_ATTEMPTS) {
