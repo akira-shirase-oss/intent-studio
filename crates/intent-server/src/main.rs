@@ -107,8 +107,16 @@ async fn main() -> anyhow::Result<()> {
                 "configuration ok: profile {:?}, listening on {}, content store {}, workspace {}",
                 config.profile,
                 config.bind,
-                if config.studio.store_dir.is_some() { "on" } else { "off (uploads answer 503)" },
-                if config.workspace_dir.is_some() { "served" } else { "not served" },
+                if config.studio.store_dir.is_some() {
+                    "on"
+                } else {
+                    "off (uploads answer 503)"
+                },
+                if config.workspace_dir.is_some() {
+                    "served"
+                } else {
+                    "not served"
+                },
             );
         }
         Command::Migrate => {
