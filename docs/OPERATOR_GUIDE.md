@@ -77,8 +77,8 @@ the env file stays root-only `0600`, readable only by systemd.
    Keep PostgreSQL's durability defaults (`fsync` and `synchronous_commit` on): a lead is
    acknowledged only after its commit, so the commit must mean it.
 
-2. **The operator password.** Pick one and hash it (the password is read from standard input,
-   never from the command line):
+2. **The operator password.** Pick one — at least 12 characters — and hash it (the password
+   is read from standard input, never from the command line):
 
    ```sh
    read -rs password && printf '%s\n' "$password" | /opt/intent-studio/bin/intent-server hash-password; unset password

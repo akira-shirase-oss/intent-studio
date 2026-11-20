@@ -22,7 +22,7 @@ use intent_domain::{
 use intent_domain::{
     limits::{
         SESSION_CHECK_FAILURES_PER_ADDRESS_PER_MINUTE, SIGN_IN_GLOBAL_PER_MINUTE,
-        SIGN_IN_PER_ADDRESS_PER_MINUTE,
+        SIGN_IN_KNOWN_PER_ADDRESS_PER_DAY, SIGN_IN_PER_ADDRESS_PER_MINUTE,
     },
     ratelimit::Quota,
 };
@@ -63,6 +63,7 @@ const KNOWN_ADDRESS_WINDOW: Duration = Duration::from_hours(30 * 24);
 /// verified, and a right password gives its token back, so it counts failed verifications.
 pub struct SignInGate {
     per_address: Limiter<AddressKey>,
+    known: Limiter<AddressKey>,
     global: Limiter<u8>,
 }
 
@@ -75,6 +76,12 @@ impl SignInGate {
         };
         Self {
             per_address: Limiter::new(quota(SIGN_IN_PER_ADDRESS_PER_MINUTE), 10_000),
+            known: Limiter::new(
+                Quota::per_day(SIGN_IN_KNOWN_PER_ADDRESS_PER_DAY).unwrap_or_else(|| {
+                    unreachable!("invariant: the known-address quota is non-zero")
+                }),
+                10_000,
+            ),
             global: Limiter::new(quota(SIGN_IN_GLOBAL_PER_MINUTE), 16),
         }
     }
@@ -89,9 +96,19 @@ impl SignInGate {
         self.global.check(0, now_ms)
     }
 
+    /// Takes a known-address day token right before a verification.
+    pub fn reserve_known(&self, address: AddressKey, now_ms: u64) -> Result<(), RetryAfter> {
+        self.known.check(address, now_ms)
+    }
+
     /// Gives the token back after a right password.
     pub fn give_back(&self) {
         self.global.refund(0);
+    }
+
+    /// Gives a known-address day token back after a right password.
+    pub fn give_back_known(&self, address: AddressKey) {
+        self.known.refund(address);
     }
 }
 
@@ -210,13 +227,9 @@ pub async fn sign_in(
     let caller = Caller::of(&app, peer, &headers);
     let address =
         crate::intake::client_address_of(&headers, peer.ip(), &app.config.trusted_proxies);
-    // Per address first, alone: a request refused here never touches the global budget.
-    if let Err(RetryAfter(secs)) = app.sign_in.admit(AddressKey::of(address), app.now_ms()) {
-        return Err(ApiError::RateLimited {
-            retry_after_secs: secs,
-        });
-    }
-    // JSON only: a cross-site form cannot send it without a preflight.
+    // JSON only: a cross-site form cannot send it without a preflight. Checked before the
+    // per-address charge so requests that cannot be sign-in attempts cannot churn the
+    // bounded table either.
     let is_json = headers
         .get(header::CONTENT_TYPE)
         .and_then(|v| v.to_str().ok())
@@ -224,28 +237,43 @@ pub async fn sign_in(
     if !is_json {
         return Err(ApiError::UnsupportedMediaType);
     }
+    // Per address first, alone: a request refused here never touches a verification budget.
+    if let Err(RetryAfter(secs)) = app.sign_in.admit(AddressKey::of(address), app.now_ms()) {
+        return Err(ApiError::RateLimited {
+            retry_after_secs: secs,
+        });
+    }
     let body = crate::intake::read_body(body).await?;
     let SignIn { password } = serde_json::from_slice(&body).map_err(|_| ApiError::MalformedBody)?;
     if password.is_empty() || password.len() > 1024 {
         return Err(ApiError::Unauthorized);
     }
-    // Only a request that reaches verification spends the global budget, and a right
-    // password gives its token back, so the budget counts failed verifications only. An
-    // address the operator signed in from in the last 30 days skips it altogether: a flood
-    // from elsewhere cannot lock the operator out of their usual place (D-052).
+    // Only a request that reaches verification spends a budget, and a right password gives
+    // the token back, so budgets count failed verifications only. An address the operator
+    // signed in from in the last 30 days spends its own day-long budget rather than the
+    // shared minute one: a flood from elsewhere cannot lock the operator out of their usual
+    // place (D-052), and it cannot guess past its own bound either.
     let known = app
         .db
         .signed_in_from_recently(&caller.address, KNOWN_ADDRESS_WINDOW)
         .await?;
-    let reserved = if known {
-        false
+    let reserved_known = if known {
+        if let Err(RetryAfter(secs)) = app
+            .sign_in
+            .reserve_known(AddressKey::of(address), app.now_ms())
+        {
+            return Err(ApiError::RateLimited {
+                retry_after_secs: secs,
+            });
+        }
+        Some(AddressKey::of(address))
     } else {
         if let Err(RetryAfter(secs)) = app.sign_in.reserve(app.now_ms()) {
             return Err(ApiError::RateLimited {
                 retry_after_secs: secs,
             });
         }
-        true
+        None
     };
     let permit = tokio::time::timeout(
         Duration::from_secs(2),
@@ -272,7 +300,9 @@ pub async fn sign_in(
         return Err(ApiError::Unauthorized);
     }
 
-    if reserved {
+    if let Some(key) = reserved_known {
+        app.sign_in.give_back_known(key);
+    } else {
         app.sign_in.give_back();
     }
     let token = new_token();
@@ -530,6 +560,32 @@ mod tests {
         assert!(gate.reserve(2_999).is_err());
         assert!(gate.reserve(3_000).is_ok());
         assert!(gate.reserve(3_000).is_err());
+    }
+
+    #[test]
+    fn a_known_address_has_a_day_budget_of_its_own() {
+        let gate = SignInGate::new();
+        for _ in 0..100 {
+            gate.reserve_known(key(1), 0).unwrap();
+        }
+        // The 101st failed verification in a day is refused, and the shared global
+        // budget is untouched by all of them.
+        assert!(gate.reserve_known(key(1), 0).is_err());
+        assert_eq!((0..25).filter(|_| gate.reserve(0).is_ok()).count(), 20);
+        // One token back every 864 s (a refused look spends the accrual up to its instant,
+        // so the last unit lands a few milliseconds late); a right password gives it back.
+        assert!(gate.reserve_known(key(1), 863_999).is_err());
+        assert!(gate.reserve_known(key(1), 864_015).is_ok());
+        gate.give_back_known(key(1));
+        assert!(gate.reserve_known(key(1), 864_015).is_ok());
+        assert!(gate.reserve_known(key(1), 864_015).is_err());
+        // Another known address gets its own day.
+        assert_eq!(
+            (0..100)
+                .filter(|_| gate.reserve_known(key(2), 0).is_ok())
+                .count(),
+            100
+        );
     }
 
     #[test]

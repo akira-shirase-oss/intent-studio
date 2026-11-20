@@ -63,6 +63,11 @@ pub const SIGN_IN_PER_ADDRESS_PER_MINUTE: u32 = 5;
 /// addresses are bounded too (D-041).
 pub const SIGN_IN_GLOBAL_PER_MINUTE: u32 = 20;
 
+/// Failed verifications per day from one known address. A known address skips the shared
+/// minute budget so a flood elsewhere cannot lock the operator out (D-052) — but it does not
+/// guess for free: the day is bounded, and a right password refunds, so only failures count.
+pub const SIGN_IN_KNOWN_PER_ADDRESS_PER_DAY: u32 = 100;
+
 /// Failed session checks per minute from one address. A session check is an UPDATE, and an
 /// anonymous client can ask for one on every request; the charge is refunded when the session
 /// turns out to be live, so only failed checks are counted (D-019's bound applies here too).

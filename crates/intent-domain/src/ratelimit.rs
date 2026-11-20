@@ -10,25 +10,53 @@ use std::net::IpAddr;
 /// Units in one token: one minute in milliseconds.
 pub const UNITS_PER_TOKEN: u64 = 60_000;
 
-/// Leads per minute; also the burst.
+/// Tokens per window; also the burst. A per-minute quota refills `tokens` units per
+/// millisecond; a longer window refills `tokens * UNITS_PER_TOKEN` per `window_ms`, in
+/// integer arithmetic that errs on the side of granting less.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Quota {
-    per_minute: u32,
+    tokens: u32,
+    window_ms: u64,
 }
 
 impl Quota {
-    /// A quota of at least one lead per minute.
-    pub fn per_minute(per_minute: u32) -> Option<Self> {
-        (per_minute > 0).then_some(Self { per_minute })
+    /// A quota of at least one token per minute.
+    pub fn per_minute(tokens: u32) -> Option<Self> {
+        (tokens > 0).then_some(Self {
+            tokens,
+            window_ms: 60_000,
+        })
     }
 
-    /// Leads per minute.
+    /// A quota of at least one token per day (24 hours).
+    pub fn per_day(tokens: u32) -> Option<Self> {
+        (tokens > 0).then_some(Self {
+            tokens,
+            window_ms: 86_400_000,
+        })
+    }
+
+    /// Tokens in the window.
     pub const fn get(self) -> u32 {
-        self.per_minute
+        self.tokens
     }
 
     const fn capacity(self) -> u64 {
-        self.per_minute as u64 * UNITS_PER_TOKEN
+        self.tokens as u64 * UNITS_PER_TOKEN
+    }
+
+    /// Units refilled over `elapsed_ms` (truncation loses less than one unit).
+    fn refill(self, elapsed_ms: u64) -> u64 {
+        let units = u128::from(elapsed_ms) * u128::from(self.tokens) * u128::from(UNITS_PER_TOKEN)
+            / u128::from(self.window_ms);
+        u64::try_from(units).unwrap_or(u64::MAX)
+    }
+
+    /// Milliseconds until `missing` units have refilled (rounded up).
+    fn wait_ms(self, missing: u64) -> u64 {
+        let rate_num = u128::from(self.tokens) * u128::from(UNITS_PER_TOKEN);
+        let wait = (u128::from(missing) * u128::from(self.window_ms)).div_ceil(rate_num);
+        u64::try_from(wait).unwrap_or(u64::MAX)
     }
 }
 
@@ -56,7 +84,7 @@ impl TokenBucket {
     /// refills nothing.
     pub fn try_take(&mut self, quota: Quota, now_ms: u64) -> Result<(), RetryAfter> {
         let elapsed = now_ms.saturating_sub(self.updated_ms);
-        let refill = elapsed.saturating_mul(u64::from(quota.get()));
+        let refill = quota.refill(elapsed);
         self.level = self.level.saturating_add(refill).min(quota.capacity());
         self.updated_ms = self.updated_ms.max(now_ms);
         if self.level >= UNITS_PER_TOKEN {
@@ -64,7 +92,7 @@ impl TokenBucket {
             return Ok(());
         }
         let missing = UNITS_PER_TOKEN - self.level;
-        let wait_ms = missing.div_ceil(u64::from(quota.get()));
+        let wait_ms = quota.wait_ms(missing);
         Err(RetryAfter(wait_ms.div_ceil(1_000).max(1)))
     }
 }
@@ -177,6 +205,30 @@ mod tests {
             assert_eq!(bucket.try_take(five(), later), Ok(()));
         }
         assert!(bucket.try_take(five(), later).is_err());
+    }
+
+    #[test]
+    fn a_daily_quota_refills_at_its_own_rate() {
+        let quota = Quota::per_day(100).unwrap();
+        let mut bucket = TokenBucket::full(quota, 0);
+        for _ in 0..100 {
+            assert_eq!(bucket.try_take(quota, 0), Ok(()));
+        }
+        // 100 a day is one token every 864 s; the retry hint names the real wait.
+        let Err(RetryAfter(wait)) = bucket.try_take(quota, 0) else {
+            panic!("the 101st take should be refused")
+        };
+        assert_eq!(wait, 864);
+        // A refused look spends the accrual up to its instant: at 863_999 ms the level is
+        // one sub-token unit short, and the remaining unit lands inside the next 15 ms.
+        assert!(bucket.try_take(quota, 863_999).is_err());
+        assert_eq!(bucket.try_take(quota, 864_015), Ok(()));
+        // Two days of idle refill only the burst, never more.
+        let later = 2 * 86_400_000;
+        for _ in 0..100 {
+            assert_eq!(bucket.try_take(quota, later), Ok(()));
+        }
+        assert!(bucket.try_take(quota, later).is_err());
     }
 
     #[test]

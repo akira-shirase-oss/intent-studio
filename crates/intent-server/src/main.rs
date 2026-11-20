@@ -71,6 +71,24 @@ fn database() -> anyhow::Result<Db> {
         .map_err(|e| anyhow::anyhow!("INTENT_DATABASE_URL: {}", e.summary()))
 }
 
+/// The operator password's floor in characters; the ceilings match sign-in's own checks so a
+/// hashed password can never be one sign-in would refuse before comparing.
+const MIN_PASSWORD_CHARS: usize = 12;
+const MAX_PASSWORD_BYTES: usize = 1024;
+
+fn check_operator_password(password: &str) -> anyhow::Result<()> {
+    anyhow::ensure!(!password.is_empty(), "the password is empty");
+    anyhow::ensure!(
+        password.chars().count() >= MIN_PASSWORD_CHARS,
+        "the password is shorter than {MIN_PASSWORD_CHARS} characters"
+    );
+    anyhow::ensure!(
+        password.len() <= MAX_PASSWORD_BYTES,
+        "the password is longer than {MAX_PASSWORD_BYTES} bytes"
+    );
+    Ok(())
+}
+
 /// On Linux the asset worker runs as the same user, and a dumpable process hands every
 /// same-uid reader its `/proc/<pid>/environ` — the database URL, the operator hash — plus its
 /// ptrace and `/proc/<pid>/mem` surface. Going non-dumpable closes all of it to anyone but
@@ -155,7 +173,7 @@ async fn main() -> anyhow::Result<()> {
                 .read_line(&mut line)
                 .context("reading the password")?;
             let password = line.trim_end_matches(['\r', '\n']);
-            anyhow::ensure!(!password.is_empty(), "the password is empty");
+            check_operator_password(password)?;
             // 16 salt bytes from the operating system's CSPRNG (a v4 UUID).
             let salt = SaltString::encode_b64(uuid::Uuid::new_v4().as_bytes())
                 .map_err(|_| anyhow::anyhow!("encoding the salt failed"))?;
@@ -199,5 +217,19 @@ mod tests {
         );
     }
 
+    #[test]
+    fn the_operator_password_has_a_floor_and_a_ceiling() {
+        use super::{MAX_PASSWORD_BYTES, MIN_PASSWORD_CHARS, check_operator_password};
+        assert!(check_operator_password("").is_err());
+        assert!(
+            check_operator_password(&"x".repeat(MIN_PASSWORD_CHARS - 1)).is_err(),
+            "an eleven-character password was accepted"
+        );
+        assert!(check_operator_password(&"x".repeat(MIN_PASSWORD_CHARS)).is_ok());
+        // Twelve characters are twelve characters in any script.
+        assert!(check_operator_password(&"é".repeat(MIN_PASSWORD_CHARS)).is_ok());
+        assert!(check_operator_password(&"x".repeat(MAX_PASSWORD_BYTES)).is_ok());
+        assert!(check_operator_password(&"x".repeat(MAX_PASSWORD_BYTES + 1)).is_err());
+    }
 }
 
