@@ -259,6 +259,10 @@ pub struct Server {
     pub log_path: PathBuf,
     env: Vec<(String, String)>,
     restarts: u32,
+    /// How the last observed exit went, for the "never started" report.
+    last_exit: Option<std::process::ExitStatus>,
+    /// Whether the server ever answered readyz; only a served log dir may be removed on drop.
+    served: bool,
 }
 
 /// Settings for a drill server: fast retries so a drill sees the whole D-030 shape in seconds.
@@ -291,6 +295,7 @@ impl Server {
         // A probed port can be taken by an outgoing connection before the server binds it
         // (macOS gives local ports from the same range): if the server cannot bind, it exits
         // at once, and the next port is tried.
+        let mut last_exit = None;
         for _ in 0..5 {
             let port = free_port();
             let address: SocketAddr = format!("127.0.0.1:{port}").parse().unwrap();
@@ -303,16 +308,20 @@ impl Server {
                 log_path: dir.join("server.log"),
                 env,
                 restarts: 0,
+                last_exit: None,
+                served: false,
             };
             server.spawn();
             if server.became_ready(Duration::from_secs(20)).await {
+                server.served = true;
                 return server;
             }
+            last_exit = server.last_exit;
             server.kill();
         }
         panic!(
-            "the server never started:\n{}",
-            std::fs::read_to_string(dir.join("server.log")).unwrap_or_default()
+            "the server never started (last attempt exited {last_exit:?}):\n{}",
+            log_tail(&dir.join("server.log"))
         );
     }
 
@@ -322,8 +331,9 @@ impl Server {
         let start = Instant::now();
         loop {
             if let Some(child) = self.child.as_mut()
-                && child.try_wait().ok().flatten().is_some()
+                && let Ok(Some(status)) = child.try_wait()
             {
+                self.last_exit = Some(status);
                 self.child = None;
                 return false;
             }
@@ -419,12 +429,21 @@ impl Server {
     }
 }
 
+/// The last bytes of a log file: a startup failure's own words, not its whole history.
+fn log_tail(path: &Path) -> String {
+    let bytes = std::fs::read(path).unwrap_or_default();
+    let start = bytes.len().saturating_sub(8192);
+    String::from_utf8_lossy(&bytes[start..]).into_owned()
+}
+
 impl Drop for Server {
     fn drop(&mut self) {
         self.kill();
-        // The log stays when the test failed (it is what the failure message points at);
-        // otherwise the temporary directory goes.
+        // The log stays when the test failed — and when this server never served: an
+        // abandoned start attempt's drop runs before start() builds the failure
+        // message, and must not erase the server's own account of why it exited.
         if !std::thread::panicking()
+            && self.served
             && let Some(dir) = self.log_path.parent()
         {
             let _ = std::fs::remove_dir_all(dir);
