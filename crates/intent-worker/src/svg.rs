@@ -291,9 +291,16 @@ fn value_is_safe(value: &str, strict: bool) -> bool {
         // A value that is not a CSS paint/transform must never smuggle a resource load.
         return !lower.contains("url(");
     }
-    // Every `(` opens a function: the name before it must be on the short list, and `url` must
-    // name a same-document fragment — `url(#id)`, optionally quoted.
-    let mut rest = lower.as_str();
+    // A strict value is ASCII only: anything else — a no-break space, a control — could
+    // spell a same-origin relative URL out of what the scan reads as `#id` at I2.
+    if !value.is_ascii() || value.bytes().any(|b| (b < 0x20 && b != b'\t') || b == 0x7f) {
+        return false;
+    }
+    // Every `(` opens a function: the name before it must be on the short list, and `url`
+    // must name a same-document fragment — `url(#id)`, at most one matching pair of
+    // quotes. The raw value is scanned: the stripped `lower` already hid whitespace and
+    // control tricks once.
+    let mut rest = value;
     while let Some(open) = rest.find('(') {
         // The name is the run of name characters before `(`; taking it with rsplit (a char
         // scan, not byte math) means a non-ASCII byte can never be sliced mid-character.
@@ -301,18 +308,51 @@ fn value_is_safe(value: &str, strict: bool) -> bool {
             .rsplit(|c: char| !(c.is_ascii_alphanumeric() || c == '-'))
             .next()
             .unwrap_or("");
-        if !FUNCTIONS.contains(&name) {
+        let name = name.to_ascii_lowercase();
+        if !FUNCTIONS.contains(&name.as_str()) {
             return false;
         }
         if name == "url" {
-            let target = rest[open + 1..].trim_start_matches(['"', '\'']);
-            if !target.starts_with('#') {
+            let Some(close) = rest[open + 1..].find(')') else {
+                return false;
+            };
+            if fragment_id(&rest[open + 1..open + 1 + close]).is_none() {
                 return false;
             }
         }
         rest = &rest[open + 1..];
     }
     true
+}
+
+/// The id in a `url(...)` argument: whitespace at the edges, at most one matching pair of
+/// quotes (`"` or `'`), then `#` and id characters — nothing else, so `'"#a` or `#a #b`
+/// can never pass as the fragment a browser would not resolve to one either.
+fn fragment_id(inner: &str) -> Option<&str> {
+    let inner = inner.trim_matches([' ', '\t']);
+    let unquoted = if inner.len() >= 2
+        && matches!(inner.as_bytes()[0], b'"' | b'\'')
+        && inner.as_bytes()[0] == inner.as_bytes()[inner.len() - 1]
+    {
+        &inner[1..inner.len() - 1]
+    } else {
+        inner
+    };
+    if unquoted.len() < 2 || !unquoted.starts_with('#') {
+        return None;
+    }
+    unquoted[1..]
+        .chars()
+        .all(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '-' | '.' | ':'))
+        .then_some(&unquoted[1..])
+}
+
+/// The only form `mask`/`clip-path` may carry: exactly `url(#id)` — canonical lowercase
+/// and nothing around it. `URL(#m)`, `url(#m) alpha`, `url(#m),url(#m)` are refused
+/// outright so the emitted shape and the shape `use_cost` counts can never diverge.
+fn canonical_paint_ref(value: &str) -> Option<String> {
+    let inner = value.trim().strip_prefix("url(")?.strip_suffix(')')?;
+    fragment_id(inner).map(|id| format!("url(#{id})"))
 }
 
 /// A `use` element's target, if it has a same-document fragment reference that resolves.
@@ -502,6 +542,9 @@ impl Writer {
                 // Handled above: either emitted once or dropped.
                 None | Some(XLINK_NS) if key == "href" => false,
                 None if key == "id" => ATTRIBUTES.contains(&key) && self.ids.insert(value.into()),
+                // mask/clip-path take only the canonical `url(#id)` — anything else in the
+                // value is dropped whole so every spelled variant is refused alike.
+                None if matches!(key, "mask" | "clip-path") => ATTRIBUTES.contains(&key),
                 None => {
                     ATTRIBUTES.contains(&key)
                         && value.len() <= 100_000
@@ -509,9 +552,15 @@ impl Writer {
                 }
                 Some(_) => false,
             };
-            if keep {
+            let canonical = matches!(key, "mask" | "clip-path")
+                .then(|| canonical_paint_ref(value))
+                .flatten();
+            if keep && matches!(key, "mask" | "clip-path") == canonical.is_some() {
                 let _ = write!(self.out, " {key}=\"");
-                escape(&mut self.out, value, true);
+                match &canonical {
+                    Some(value) => self.out.push_str(value),
+                    None => escape(&mut self.out, value, true),
+                }
                 self.out.push('"');
             } else {
                 self.removed += 1;
@@ -668,6 +717,83 @@ mod tests {
                                 <rect clip-path=\"url(#c)\"/>"))
         .unwrap();
         assert!(ok.svg.contains("clip-path=\"url(#c)\""), "{}", ok.svg);
+    }
+
+    #[test]
+    fn mask_and_clip_take_only_the_canonical_fragment() {
+        // Every spelling that is not exactly `url(#id)` is dropped whole — uppercase,
+        // trailing paint, a list, whitespace inside the parens — so the emitted value and
+        // the value `use_cost` counts can never disagree about a reference.
+        for value in [
+            "URL(#m)",
+            "Url(#m)",
+            "url(#m) alpha",
+            "url(#m),url(#n)",
+            "url( #m )extra",
+            "none",
+            "inherit",
+        ] {
+            let out = sanitize(&doc(&format!("<rect mask=\"{value}\"/>")))
+                .unwrap()
+                .svg;
+            assert!(
+                !out.contains("mask"),
+                "spelled variant kept: {value:?} → {out}"
+            );
+        }
+        // The canonical form — whitespace inside the parens included — is emitted in one
+        // shape, so a count of what was emitted is a count of what renders.
+        for (value, emitted) in [
+            ("url(#m)", "url(#m)"),
+            ("url( #m )", "url(#m)"),
+            ("url('#m')", "url(#m)"),
+        ] {
+            let out = sanitize(&doc(&format!(
+                "<defs><mask id=\"m\"><rect/></mask></defs><rect mask=\"{value}\"/>"
+            )))
+            .unwrap()
+            .svg;
+            assert!(
+                out.contains(&format!("mask=\"{emitted}\"")),
+                "{value:?} → {out}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_fragment_argument_is_ascii_one_quote_pair_and_id_chars() {
+        // Unicode whitespace or controls inside the parens, and quotes that do not pair,
+        // read to a browser as a relative same-origin URL — not the fragment the scan saw.
+        for value in ["url(\u{a0}#a)", "url(''#a'')", "url(#a #b)", "url(#a'b)"] {
+            let out = sanitize(&doc(&format!("<rect fill=\"{value}\"/>")))
+                .unwrap()
+                .svg;
+            assert!(
+                !out.contains("fill"),
+                "odd fragment kept: {value:?} → {out}"
+            );
+        }
+        // A value holding both quote kinds reaches the attribute through entities:
+        // `&apos;&quot;` decodes to `'"` — a quote pair that does not match is refused.
+        let out = sanitize(&doc("<rect mask=\"url(&apos;&quot;#a&apos;)\"/>"))
+            .unwrap()
+            .svg;
+        assert!(!out.contains("mask"), "mixed-quote fragment kept: {out}");
+        for value in [
+            "url(#a)",
+            "url('#a')",
+            "url(&quot;#a&quot;)",
+            "url( #a-b_c.d:e )",
+            "url(\u{9}#a)",
+        ] {
+            let out = sanitize(&doc(&format!("<rect fill=\"{value}\"/>")))
+                .unwrap()
+                .svg;
+            assert!(
+                out.contains("fill"),
+                "good fragment dropped: {value:?} → {out}"
+            );
+        }
     }
 
     #[test]
