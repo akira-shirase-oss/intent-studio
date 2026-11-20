@@ -20,6 +20,16 @@ cargo fmt --all --check
 
 step clippy
 cargo clippy --workspace --all-targets --locked -- -D warnings
+# Linux-only cfg (the worker's seccomp confinement, the server's non-dumpable setup) never
+# compiles under macOS clippy; the check-only target pass needs no linker. Scoped to
+# intent-worker — all hand-rolled Linux code lives there (intent-server's one cfg is a
+# safe rustix call), and a full-workspace pass would build C deps (ring via rustls) that
+# need a cross C toolchain most hosts lack. Skipped where the target is not installed —
+# CI installs it and runs the workspace-wide pass there instead.
+if rustup target list --installed 2>/dev/null | grep -qx "x86_64-unknown-linux-gnu"; then
+    step "clippy (intent-worker, x86_64-unknown-linux-gnu)"
+    cargo clippy -p intent-worker --all-targets --locked --target x86_64-unknown-linux-gnu -- -D warnings
+fi
 
 step tests
 cargo test --workspace --locked

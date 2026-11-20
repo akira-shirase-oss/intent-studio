@@ -95,11 +95,8 @@ fn check_operator_password(password: &str) -> anyhow::Result<()> {
 /// root (D-011). A failure means the guarantee did not take; refuse to run.
 #[cfg(target_os = "linux")]
 fn deny_dumpable() -> anyhow::Result<()> {
-    // SAFETY: PR_SET_DUMPABLE takes no pointer arguments.
-    if unsafe { libc::prctl(libc::PR_SET_DUMPABLE, 0, 0, 0, 0) } != 0 {
-        return Err(std::io::Error::last_os_error()).context("prctl(PR_SET_DUMPABLE)");
-    }
-    Ok(())
+    rustix::process::set_dumpable_behavior(rustix::process::DumpableBehavior::NotDumpable)
+        .context("prctl(PR_SET_DUMPABLE)")
 }
 
 #[tokio::main]
