@@ -835,6 +835,74 @@ starting values; changing one needs a measurement and a new entry.
   the webhook adapter speaks plain HTTP until the e-mail adapter (I3).
   Cost: the deploy test adds about a minute to the gate.
 
+## Decisions from the independent I1 white-hat review (2026-11-19)
+
+- **D-065 — A session check is priced like the write it is.** The review
+  showed `require_operator` ran its `UPDATE operator_sessions` on the
+  shared pool with no budget at all: a flood of shaped-but-random cookies
+  turned into unbounded writes against the same pool intake uses
+  (invariant 5). Now a failed session check costs one of
+  `SESSION_CHECK_FAILURES_PER_ADDRESS_PER_MINUTE` (20) tokens charged per
+  client address after the trusted-proxy resolution; a live session (or a
+  delete that found a row) refunds it, so the budget counts failures
+  only. The checks themselves moved to their own four-connection pool
+  with a 1 s acquire and statement timeout, like the prober's (D-047), so
+  even a charged flood cannot starve intake's pool. `DELETE
+  /v1/operator/session` is bounded the same way because it is a write
+  too. Proven by the `SessionGate` unit tests and the flood drill
+  (`operator::a_flood_of_bad_session_cookies_is_limited_and_leaves_intake_alone`,
+  which returned 401 forever before).
+
+- **D-066 — The worker confines itself; the deployment says so.** D-062
+  owed the container "at deployment"; the review pointed out that same-
+  user deployment still handed a decoder bug the server's environment
+  (`/proc/<pid>/environ` holds the database URL and the operator hash),
+  the root-readable env file, and loopback (the database, the webhook).
+  Chosen instead of a container runtime: the worker installs its own
+  seccomp filter before it reads a byte — a deny list answering EPERM
+  that names every socket call, every file operation by name
+  (`openat`/`openat2`/`open_by_handle_at`, the `*at` family and the
+  legacy x86_64 calls), exec, new processes and namespaces, signals to
+  other processes, mounts, ptrace and friends, inotify/fanotify, and
+  io_uring — leaving it the stdin/stdout pipes it was started with and
+  nothing else; the server goes non-dumpable (`PR_SET_DUMPABLE, 0`) so
+  same-uid `/proc` reading and ptrace stop working; the env file becomes
+  root-only `0600` (systemd reads it for the unit; the guide's `sudo -u
+  intent sh -c '. env'` steps become `systemd-run -p EnvironmentFile=…
+  -p User=intent`). `RestrictNamespaces` in the unit already keeps the
+  child from making a user namespace to route around the filter. Proven
+  by the `denied_syscalls` unit test and `the_process_goes_non_dumpable`
+  on Linux. A missed syscall still runs — the deny list is not an
+  allowlist — so rlimits, the empty environment and the one-job process
+  model stay primary.
+
+- **D-067 — The review's smaller hardening, batched.** (a) The SVG
+  sanitizer no longer scans for literal `url(`: backslashes are refused
+  outright (a CSS escape can spell any forbidden token), every `(`
+  must open a name on a ten-function allowlist, `url()` must name a
+  same-document fragment, and `<use>` expansion is preflighted for depth
+  (8) and total cost (512) with cycle detection — a renderer's expansion
+  is exponential otherwise. (b) `withdraw_fact` joins the other writes:
+  `application/json` or the `x-intent` header is required, so a foreign
+  form carrying the session cookie hears 415 before anything is
+  withdrawn. (c) `hash-password` refuses under 12 characters (and over
+  sign-in's own 1024-byte ceiling, so a hashed password can never be one
+  sign-in refuses before comparing), and D-052's known-address rule gains
+  its own budget: a known address spends a 100-per-day verification
+  budget refunded on success, rather than skipping a bound entirely —
+  and the content-type check runs before the per-address charge so junk
+  cannot churn the bounded key table. (d) The Caddyfile sets
+  `Strict-Transport-Security: max-age=63072000; includeSubDomains`. (e)
+  The production profile refuses `INTENT_COOKIE_SECURE=false` and an
+  `http://` webhook whose target is not loopback, `localhost` or a
+  private address; TLS is not offered because the build's reqwest has
+  none — a remote provider sits behind a local relay. (f) `check-config`
+  no longer opens the store: it verifies the root exists-or-is-creatable
+  and writable, the worker exists and the egress guard builds, without
+  touching the live lock the old server holds through an upgrade. Each
+  fix carries its test; the deploy drill now runs `check-config` against
+  a running server and greps the Caddyfile for HSTS.
+
 ## Open questions (still open)
 
 These need the maintainer or an outside party; each is in the README's
