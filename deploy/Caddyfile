@@ -23,6 +23,10 @@ studio.example.com {
 
 	encode zstd gzip
 
+	# Browsers that have reached this site over HTTPS once never fall back to plain HTTP
+	# again, and a certificate problem stays a hard error.
+	header Strict-Transport-Security "max-age=63072000; includeSubDomains"
+
 	# The access log carries method, path, status and timing. Caddy redacts Cookie and
 	# Authorization; lead bodies are never logged by either side (D-029).
 	log {

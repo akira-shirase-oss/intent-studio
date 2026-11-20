@@ -160,6 +160,7 @@ if grep -qE 'example\.test|Deploy Smoke|\$argon2|intent-dev|'"$password" "$scrat
 fi
 
 step "the systemd unit and the Caddyfile"
+grep -q 'Strict-Transport-Security' deploy/Caddyfile || fail "the Caddyfile sets no HSTS header"
 if command -v systemd-analyze >/dev/null 2>&1; then
     unit="$scratch/intent-studio.service"
     sed -e "s|^ExecStart=.*|ExecStart=$prefix/bin/intent-server serve|" \
