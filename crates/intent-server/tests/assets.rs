@@ -162,16 +162,34 @@ async fn uploads_are_sanitized_or_refused_and_references_stay_public() {
     let base = server.base.clone();
     let cookie = sign_in(&base).await;
 
-    // Nothing is read before the session check, and the upload header is required.
+    // Nothing is read before the session check, and the upload header is required. A
+    // small body proves the refusal is 401; a megabyte the server never consumes proves
+    // it without relying on the response surviving a mid-write close — the close itself
+    // is the refusal working.
     let anonymous = client()
+        .post(format!("{base}/v1/operator/tenants/{DEMO_TENANT}/assets"))
+        .header("content-type", "multipart/form-data; boundary=x")
+        .header("x-intent-upload", "1")
+        .body(b"x".to_vec())
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(anonymous.status(), 401);
+    let big = client()
         .post(format!("{base}/v1/operator/tenants/{DEMO_TENANT}/assets"))
         .header("content-type", "multipart/form-data; boundary=x")
         .header("x-intent-upload", "1")
         .body(vec![b'x'; 1_000_000])
         .send()
-        .await
-        .unwrap();
-    assert_eq!(anonymous.status(), 401);
+        .await;
+    match big {
+        Ok(response) => assert_eq!(response.status(), 401),
+        // EPIPE/reset writing the unread body is the same refusal reaching us early.
+        Err(error) => assert!(
+            error.is_request(),
+            "the anonymous upload failed for a reason that is not the refusal: {error}"
+        ),
+    }
     let (status, _) = upload(
         &base,
         &cookie,

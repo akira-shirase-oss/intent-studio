@@ -87,27 +87,39 @@ async fn a_slow_body_cannot_starve_the_other_connections() {
     .await
     .unwrap();
 
-    // While it dribbles, other clients are served: twenty health checks, all answered.
+    // While it dribbles, other clients are served: twenty health checks, all answered. The
+    // server closing the dribbler mid-write (EPIPE/reset) is the protection working, not a
+    // test failure — a close is itself an answer.
     let healthz = format!("{}/healthz", server.base);
+    let mut answered = false;
     for _ in 0..20 {
-        slow.write_all(b"x").await.unwrap();
+        if !answered && slow.write_all(b"x").await.is_err() {
+            answered = true;
+        }
         let status = client.get(&healthz).send().await.unwrap().status();
         assert_eq!(status, 200);
         tokio::time::sleep(Duration::from_millis(150)).await;
     }
 
     // And the dribble has a deadline: the server must give up on the promised body (the
-    // request timeout's default is 5 s) rather than hold the connection open forever.
-    let mut buf = [0u8; 512];
-    let deadline = tokio::time::Instant::now() + Duration::from_secs(15);
-    loop {
-        match tokio::time::timeout_at(deadline, slow.read(&mut buf)).await {
-            Ok(Ok(0)) => break,
-            Ok(Err(_io)) => break,
-            Ok(Ok(_)) => {
-                slow.write_all(b"x").await.unwrap();
+    // request timeout's default is 5 s) rather than hold the connection open forever. A
+    // refusal response, EOF or a write error are all the end; only silence past the
+    // deadline fails.
+    if !answered {
+        let mut buf = [0u8; 512];
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(15);
+        loop {
+            match tokio::time::timeout_at(deadline, slow.read(&mut buf)).await {
+                Ok(Ok(0) | Err(_)) => break,
+                Ok(Ok(_)) => {
+                    if slow.write_all(b"x").await.is_err() {
+                        break;
+                    }
+                }
+                Err(elapsed) => {
+                    panic!("the server held a dribbled body open past 15 s: {elapsed}")
+                }
             }
-            Err(elapsed) => panic!("the server held a dribbled body open past 15 s: {elapsed}"),
         }
     }
 }

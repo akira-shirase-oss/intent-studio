@@ -318,6 +318,12 @@ mod tests {
             output.status.code(),
             String::from_utf8_lossy(&output.stderr)
         );
-        assert_eq!(String::from_utf8_lossy(&output.stdout), "CONFINED\n");
+        // The child is this test binary re-run under a filter, so libtest's own lines share
+        // its stdout: the marker must appear as a line, not be the whole output.
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        assert!(
+            stdout.lines().any(|line| line == "CONFINED"),
+            "the confined child never printed CONFINED: {stdout}"
+        );
     }
 }

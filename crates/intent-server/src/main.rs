@@ -49,8 +49,8 @@ enum Command {
     /// Apply the process hardening, print the dumpable flag, and exit — the
     /// shipped-binary proof that `main`'s hardening ran (Linux only). A
     /// subcommand, not an env var: an `INTENT_PROBE_DUMPABLE` left in a unit's
-    /// EnvironmentFile would turn `serve` into a no-op exit(0) systemd counts
-    /// as success (NEW-5).
+    /// `EnvironmentFile` would turn `serve` into a no-op `exit(0)` `systemd`
+    /// counts as success (NEW-5).
     #[cfg(target_os = "linux")]
     ProbeDumpable,
     /// Check a run's acknowledgments against the database; exits 1 on any violation.
