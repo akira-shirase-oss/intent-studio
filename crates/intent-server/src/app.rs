@@ -80,6 +80,10 @@ pub struct Inner {
     /// Drill-injected clock offset on `now_ms` (K): zero unless `INTENT_TEST_CLOCK`
     /// mounted `POST /__test/clock`.
     clock_skew_ms: std::sync::atomic::AtomicU64,
+    /// The base the pinned test clock counts from (`now_ms = base + skew`
+    /// under `INTENT_TEST_CLOCK`); zero — `started` is `Instant::now()` here.
+    #[cfg(feature = "mutation-seams")]
+    clock_base_ms: u64,
     /// Which credential issued sessions and known addresses (F1, D-069): sessions
     /// and sign-ins under a rotated-out hash stop counting the moment this value
     /// changes. `None` when no operator password is configured.
@@ -131,6 +135,8 @@ impl App {
             studio,
             started: Instant::now(),
             clock_skew_ms: std::sync::atomic::AtomicU64::new(0),
+            #[cfg(feature = "mutation-seams")]
+            clock_base_ms: 0,
             operator_credential_fp,
             config,
             db,
@@ -140,9 +146,20 @@ impl App {
         }))
     }
 
-    /// Milliseconds on the process's monotonic clock (for token buckets), plus any
-    /// drill-injected offset (K).
+    /// Milliseconds the server reads as "now" (token buckets, idle windows).
+    /// Normally the process's monotonic clock plus any drill-injected offset
+    /// (K); under `INTENT_TEST_CLOCK` it is a PIN — boot base plus injected
+    /// offset only, real elapsed ignored — so drill time cannot creep with
+    /// wall time however slow the work between advances is (F2: Argon2's
+    /// variable cost let the global bucket refill mid-flood).
     pub fn now_ms(&self) -> u64 {
+        #[cfg(feature = "mutation-seams")]
+        if self.config.test_clock {
+            return self.clock_base_ms.saturating_add(
+                self.clock_skew_ms
+                    .load(std::sync::atomic::Ordering::Relaxed),
+            );
+        }
         let elapsed = u64::try_from(self.started.elapsed().as_millis()).unwrap_or(u64::MAX);
         elapsed.saturating_add(
             self.clock_skew_ms
