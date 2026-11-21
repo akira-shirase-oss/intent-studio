@@ -14,7 +14,10 @@
 //! the claim lint for free text ([`claims`]), the typed page tree and its validator
 //! ([`page_tree`]), and the named, path-carrying problems they report ([`problem`]).
 
+pub mod baseline;
 pub mod brief;
+pub mod bundle;
+pub mod checks;
 pub mod claims;
 pub mod content;
 pub mod fact;
