@@ -12,6 +12,7 @@
 
 use intent_render::{AssetKind, Processed, WorkerRefusal};
 
+pub mod checks;
 pub mod font;
 pub mod raster;
 pub mod svg;
@@ -19,6 +20,7 @@ pub mod svg;
 /// Runs the check for `kind` over `input`.
 pub fn process(kind: AssetKind, input: &[u8]) -> Result<Processed, WorkerRefusal> {
     match kind {
+        AssetKind::Check => checks::check(input),
         AssetKind::Svg => {
             let clean = svg::sanitize(input)?;
             Ok(Processed {

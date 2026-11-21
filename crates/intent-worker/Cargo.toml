@@ -10,6 +10,7 @@ publish.workspace = true
 [dependencies]
 # PNG and JPEG only, no threads (one job per process, CPU-limited).
 image = { workspace = true }
+intent-domain.workspace = true
 intent-render.workspace = true
 rlimit.workspace = true
 roxmltree.workspace = true

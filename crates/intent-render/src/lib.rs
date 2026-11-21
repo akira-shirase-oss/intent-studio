@@ -45,6 +45,9 @@ pub enum AssetKind {
     Jpeg,
     /// TrueType or OpenType font: parsed and checked.
     Font,
+    /// A site bundle: the static half of the check suite (D-022), answering a
+    /// JSON report instead of transformed bytes.
+    Check,
 }
 
 impl AssetKind {
@@ -55,12 +58,13 @@ impl AssetKind {
             Self::Png => "png",
             Self::Jpeg => "jpeg",
             Self::Font => "font",
+            Self::Check => "check",
         }
     }
 
     /// Parses the worker's argument.
     pub fn parse(text: &str) -> Option<Self> {
-        [Self::Svg, Self::Png, Self::Jpeg, Self::Font]
+        [Self::Svg, Self::Png, Self::Jpeg, Self::Font, Self::Check]
             .into_iter()
             .find(|k| k.as_str() == text)
     }
@@ -211,6 +215,7 @@ pub fn decode_answer(stdout: &[u8]) -> Result<Processed, WorkerRefusal> {
         "image/jpeg",
         "font/ttf",
         "font/otf",
+        "application/json",
     ];
     match (header.media_type, header.length) {
         (Some(media_type), Some(length))

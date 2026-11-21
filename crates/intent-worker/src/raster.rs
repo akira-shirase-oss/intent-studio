@@ -35,7 +35,9 @@ pub fn reencode(kind: AssetKind, input: &[u8]) -> Result<Reencoded, WorkerRefusa
         AssetKind::Png if input.starts_with(PNG_MAGIC) => (ImageFormat::Png, "image/png"),
         AssetKind::Jpeg if input.starts_with(JPEG_MAGIC) => (ImageFormat::Jpeg, "image/jpeg"),
         AssetKind::Png | AssetKind::Jpeg => return Err(WorkerRefusal::TypeMismatch),
-        AssetKind::Svg | AssetKind::Font => return Err(WorkerRefusal::UnsupportedType),
+        AssetKind::Svg | AssetKind::Font | AssetKind::Check => {
+            return Err(WorkerRefusal::UnsupportedType);
+        }
     };
     let mut reader = ImageReader::with_format(Cursor::new(input), format);
     let mut limits = Limits::default();

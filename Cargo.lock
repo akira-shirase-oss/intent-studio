@@ -1154,6 +1154,7 @@ name = "intent-worker"
 version = "0.1.0-alpha.0"
 dependencies = [
  "image",
+ "intent-domain",
  "intent-render",
  "libc",
  "rlimit",
