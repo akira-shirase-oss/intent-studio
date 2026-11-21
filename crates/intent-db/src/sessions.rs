@@ -102,4 +102,21 @@ impl Db {
         tx.commit().await.map_err(classify)?;
         Ok(deleted)
     }
+
+    /// Ends every session bound to a different credential fingerprint — all of
+    /// them when no credential is configured (N1). Runs at boot before
+    /// readiness: `session_lifetime` only REFUSES a rotated-out fingerprint, it
+    /// does not remove the row, so booting the old hash again would revive a
+    /// thief's cookie inside the idle window.
+    pub async fn drop_sessions_outside_credential(&self, fp: Option<&str>) -> Result<u64, DbError> {
+        let rows = sqlx::query(
+            "DELETE FROM operator_sessions WHERE $1::text IS NULL OR credential_fp IS DISTINCT FROM $1",
+        )
+        .bind(fp)
+        .execute(&self.pool)
+        .await
+        .map_err(classify)?
+        .rows_affected();
+        Ok(rows)
+    }
 }

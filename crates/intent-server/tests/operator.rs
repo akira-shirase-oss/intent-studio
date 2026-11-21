@@ -685,7 +685,7 @@ async fn a_rotated_credential_ends_the_sessions_it_issued() {
     );
     let mut env = drill_env(&db, &fixture.url);
     env.retain(|(k, _)| k != "INTENT_COOKIE_SECURE");
-    env.push(("INTENT_OPERATOR_PASSWORD_HASH".into(), hash_a));
+    env.push(("INTENT_OPERATOR_PASSWORD_HASH".into(), hash_a.clone()));
     env.push(("INTENT_TRUSTED_PROXIES".into(), "127.0.0.1".into()));
     let mut server = Server::start(env).await;
     let client = client();
@@ -702,14 +702,36 @@ async fn a_rotated_credential_ends_the_sessions_it_issued() {
         .unwrap()
         .to_owned();
 
-    // Rotation = a boot carrying a different hash: the same session row is still
-    // in the table, and the new process must not count it.
+    // N2 — first the stability side: a restart with the SAME hash must keep the
+    // session. If the fingerprint churned every boot (or create and check ever
+    // disagreed), every deploy would sign the operator out — and the 60 s
+    // verified cache would hide that mismatch for a minute at a time.
     server.kill();
+    let mut env = drill_env(&db, &fixture.url);
+    env.retain(|(k, _)| k != "INTENT_COOKIE_SECURE");
+    env.push(("INTENT_OPERATOR_PASSWORD_HASH".into(), hash_a.clone()));
+    env.push(("INTENT_TRUSTED_PROXIES".into(), "127.0.0.1".into()));
+    let mut server_same = Server::start(env).await;
+    let still = client
+        .get(format!("{}/v1/operator/session", server_same.base))
+        .header("cookie", &cookie)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(
+        still.status(),
+        200,
+        "a restart with the same credential signed the operator out"
+    );
+
+    // Rotation = a boot carrying a different hash: the sweep drops the row and
+    // the new process must not count it.
+    server_same.kill();
     let mut env = drill_env(&db, &fixture.url);
     env.retain(|(k, _)| k != "INTENT_COOKIE_SECURE");
     env.push(("INTENT_OPERATOR_PASSWORD_HASH".into(), hash_b));
     env.push(("INTENT_TRUSTED_PROXIES".into(), "127.0.0.1".into()));
-    let server2 = Server::start(env).await;
+    let mut server2 = Server::start(env).await;
     let out = client
         .get(format!("{}/v1/operator/session", server2.base))
         .header("cookie", &cookie)
@@ -724,5 +746,26 @@ async fn a_rotated_credential_ends_the_sessions_it_issued() {
     // Control: the password still signs in — the session ended, not the operator.
     let fresh = sign_in(&client, &server2.base, PASSWORD, "10.84.0.1", "req-f1-new").await;
     assert_eq!(fresh.status(), 200);
+
+    // N1 — and rotating BACK revives nothing: the rotated-out row was dropped at
+    // the last boot, not merely refused — the gate's refusal alone would let the
+    // old cookie live again the moment the old hash returned.
+    server2.kill();
+    let mut env = drill_env(&db, &fixture.url);
+    env.retain(|(k, _)| k != "INTENT_COOKIE_SECURE");
+    env.push(("INTENT_OPERATOR_PASSWORD_HASH".into(), hash_a));
+    env.push(("INTENT_TRUSTED_PROXIES".into(), "127.0.0.1".into()));
+    let server3 = Server::start(env).await;
+    let back = client
+        .get(format!("{}/v1/operator/session", server3.base))
+        .header("cookie", &cookie)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(
+        back.status(),
+        401,
+        "rotating back to the original hash revived a session the sweep should have dropped"
+    );
     db.drop_database().await;
 }

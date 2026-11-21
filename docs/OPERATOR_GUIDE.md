@@ -135,6 +135,11 @@ fingerprint of the hash that created it and only the current fingerprint authent
 a stolen cookie dies at its next request — no list to revoke, nothing to wait for. Every
 operator signs in again under the new password.
 
+Re-hashing the *same* password ends every session too: the fingerprint is of the stored
+hash, not the password's plain text, and a fresh Argon2 hash of the same password is a
+new credential — sessions under the old hash are refused, and the boot sweep drops
+their rows.
+
 The deliberate trade-off, once per rotation (D-069): boot restores each known address's
 day-long sign-in budget only from sign-ins made under the *current* credential, so a usual
 address rejoins the shared 20/minute budget until the first successful sign-in under the

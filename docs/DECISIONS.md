@@ -958,6 +958,10 @@ starting values; changing one needs a measurement and a new entry.
   every address rejoins the shared budget until its next successful
   sign-in — and sessions issued before the migration match no
   fingerprint, so every operator signs in once.
+  Refusal alone is not removal (N1): rows bound to a rotated-out
+  fingerprint are dropped at every boot before readiness, else
+  restoring the old hash inside the idle window would revive a stolen
+  cookie — and a boot with no credential configured drops every row.
 
 ## Open questions (still open)
 

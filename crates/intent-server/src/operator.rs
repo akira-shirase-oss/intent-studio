@@ -838,9 +838,14 @@ fn digest(token: &str) -> [u8; 32] {
 
 /// Which credential a sign-in proved, as a fingerprint of the configured hash —
 /// recorded on the `operator.sign_in` audit row so a restart seeds the known-address
-/// set only from sign-ins under the CURRENT credential. After a rotation, an address
-/// that last signed in under the old password earns no day budget until it signs in
-/// again: the trade-off the rotation buys (D). SHA-256 of the hash string, truncated.
+/// set only from sign-ins under the CURRENT credential, and written onto every
+/// `operator_sessions` row so a session dies with the credential that issued it:
+/// `session_lifetime` refuses a mismatched fingerprint at the gate and the boot
+/// sweep drops those rows (N1). Note the input is the HASH, not the password —
+/// re-hashing the same password ends every session too. After a rotation, an
+/// address that last signed in under the old password earns no day budget until
+/// it signs in again: the trade-off the rotation buys (D). SHA-256 of the hash
+/// string, truncated.
 pub(crate) fn credential_fingerprint(secret: &crate::config::Secret) -> String {
     let digest = Sha256::digest(secret.expose().as_bytes());
     hex::encode(&digest[..16])
