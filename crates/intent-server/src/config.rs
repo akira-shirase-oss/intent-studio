@@ -616,9 +616,16 @@ impl Config {
         let cookie_secure = env.parse("INTENT_COOKIE_SECURE", true);
         // `INTENT_TEST_CLOCK` mounts `POST /__test/clock`, the drills' way to age the
         // process clock without a wall-clock wait (K) — compiled only under the
-        // mutation-seams feature, so no env file can ever arm it in a shipped binary.
+        // mutation-seams feature and refused outside development, like INTENT_MUTATION:
+        // a request that moves the clock moves sessions, budgets and rate limits (F6).
         #[cfg(feature = "mutation-seams")]
         let test_clock = env.parse("INTENT_TEST_CLOCK", false);
+        #[cfg(feature = "mutation-seams")]
+        if test_clock && profile != Profile::Development {
+            env.problems.push(
+                "INTENT_TEST_CLOCK lets a request move the process clock and exists only under INTENT_PROFILE=development".into(),
+            );
+        }
         #[cfg(not(feature = "mutation-seams"))]
         let test_clock = false;
         // An insecure operator cookie in production would ride every plaintext hop.
@@ -857,6 +864,28 @@ mod tests {
             ("INTENT_PROFILE", "staging"),
         ]);
         assert!(unknown.unwrap_err().to_string().contains("INTENT_PROFILE"));
+    }
+
+    #[cfg(feature = "mutation-seams")]
+    #[test]
+    fn the_test_clock_answers_only_to_development() {
+        // A request that moves the clock moves sessions, budgets and rate limits —
+        // the env must refuse it outside development, the same ruling INTENT_MUTATION
+        // carries (F6). No INTENT_PROFILE pair: production is the default.
+        let base = [
+            (
+                "INTENT_DATABASE_URL",
+                "postgres://u:p@127.0.0.1:59432/intent",
+            ),
+            ("INTENT_NOTIFY_PROVIDER", "webhook"),
+            ("INTENT_NOTIFY_WEBHOOK_URL", "http://127.0.0.1:9/hook"),
+            ("INTENT_TEST_CLOCK", "true"),
+        ];
+        let text = config(&base).unwrap_err().to_string();
+        assert!(text.contains("INTENT_TEST_CLOCK"), "{text}");
+        let mut dev = base.to_vec();
+        dev.push(("INTENT_PROFILE", "development"));
+        assert!(config(&dev).is_ok());
     }
 
     #[test]

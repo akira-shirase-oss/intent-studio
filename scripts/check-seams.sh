@@ -55,7 +55,18 @@ if [ "${1:-}" = "--prove" ]; then
         echo "PROOF FAILED: the scan passed a mutated binary" >&2
         exit 1
     fi
-    echo "proof ok: the scan refuses a mutated binary"
+    # The refusal must cover the clock seam specifically (F6): a pass attributable
+    # to any other pattern proves nothing about the clock strings. Each must be
+    # present — and therefore detectable — in the feature binary itself.
+    for needle in INTENT_TEST_CLOCK __test/clock advance_ms; do
+        status=0
+        LC_ALL=C grep -qaF "$needle" "$built" || status=$?
+        if [ "$status" -ne 0 ]; then
+            echo "PROOF FAILED: '$needle' is not detectable in the feature binary (grep exit $status)" >&2
+            exit 1
+        fi
+    done
+    echo "proof ok: the scan refuses a mutated binary (clock seam detected)"
     exit 0
 fi
 

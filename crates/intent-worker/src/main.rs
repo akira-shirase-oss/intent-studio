@@ -302,9 +302,13 @@ mod tests {
                 .env(CHILD_FLAG, probe)
                 .status()
                 .unwrap();
-            assert!(
-                status.signal().is_some(),
-                "{probe} probe was not killed by the filter: {status:?}"
+            // Seccomp's kill action answers a denied syscall with SIGSYS — no other
+            // signal is the filter's signature (F6): a SIGSEGV crash or an external
+            // SIGKILL must not satisfy this proof.
+            assert_eq!(
+                status.signal(),
+                Some(libc::SIGSYS),
+                "{probe} probe was not killed by the seccomp filter: {status:?}"
             );
         }
         let output = std::process::Command::new(std::env::current_exe().unwrap())
