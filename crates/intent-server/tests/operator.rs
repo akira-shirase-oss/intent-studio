@@ -562,6 +562,7 @@ async fn a_sign_out_the_database_cannot_confirm_is_an_honest_503_and_the_cookie_
     db.drop_database().await;
 }
 
+#[cfg(feature = "mutation-seams")] // POST /__test/clock exists only in feature builds (K, F2).
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[ignore = "needs the stack: scripts/stack.sh up (run by scripts/drills.sh)"]
 async fn a_restart_seeds_only_in_window_sign_ins_under_the_current_credential() {
@@ -571,6 +572,11 @@ async fn a_restart_seeds_only_in_window_sign_ins_under_the_current_credential() 
     // spent from FOUR OTHER addresses so only the day budget can let a sign-in
     // through — the 5/min per-address quota would refuse a sixth attempt on its
     // own and hide the difference; the flood is what makes the test red.
+    //
+    // Under INTENT_TEST_CLOCK the drill ages the server clock deterministically:
+    // the global bucket's refill runs on the injected time, so twenty Argon2
+    // verifications — however slow the machine — can never refill it mid-flood,
+    // and the edge row's expiry is one advance away, not a wall-clock sleep (F2).
     let db = TestDb::create(1).await;
     let fixture = ProviderFixture::start(Mode::Ok).await;
     let mut env = drill_env(&db, &fixture.url);
@@ -578,6 +584,7 @@ async fn a_restart_seeds_only_in_window_sign_ins_under_the_current_credential() 
     let hash = hash();
     env.push(("INTENT_OPERATOR_PASSWORD_HASH".into(), hash.clone()));
     env.push(("INTENT_TRUSTED_PROXIES".into(), "127.0.0.1".into()));
+    env.push(("INTENT_TEST_CLOCK".into(), "true".into()));
     // The fingerprint the server computes from the env's hash — the drill seeds
     // audit rows the server's own sign-in would have written.
     let fp = {
@@ -586,14 +593,15 @@ async fn a_restart_seeds_only_in_window_sign_ins_under_the_current_credential() 
     };
     let mut conn = db.connect().await;
     // 10.83.9.9  — deep inside the window under the current credential: stays known.
-    // 10.83.9.10 — 8 s left on its audit window: the mark must die on the audit's
-    //              own clock, not renew for 30 days at boot (the renewal bug).
+    // 10.83.9.10 — an hour left on its audit window: the mark must die on the
+    //              audit's own clock, not renew for 30 days at boot (the renewal
+    //              bug). An hour survives the slowest boot; the advance crosses it.
     // 10.83.9.11 — fresh but under a rotated-out credential: rotation evicts it.
     sqlx::query(
         "INSERT INTO operator_audit (action, address, at, detail) VALUES
          ('operator.sign_in', '10.83.9.9',  now() - interval '1 minute',
             jsonb_build_object('credential_fp', $1::text)),
-         ('operator.sign_in', '10.83.9.10', now() - interval '30 days' + interval '8 seconds',
+         ('operator.sign_in', '10.83.9.10', now() - interval '30 days' + interval '1 hour',
             jsonb_build_object('credential_fp', $1::text)),
          ('operator.sign_in', '10.83.9.11', now() - interval '1 minute',
             jsonb_build_object('credential_fp', 'a-rotated-out-fingerprint'))",
@@ -604,9 +612,17 @@ async fn a_restart_seeds_only_in_window_sign_ins_under_the_current_credential() 
     .unwrap();
     let server = Server::start(env).await;
     let client = client();
-    // The edge-of-window row's own clock runs out — the seed marks expiry on wall
-    // time (the audit `at`s are wall-clock), so only a real wait observes it.
-    tokio::time::sleep(Duration::from_secs(10)).await;
+    // Advance past .10's hour but nowhere near .9's month: .10's mark expires on
+    // the audit's own schedule while .9's stays. The marks were seeded at skew 0,
+    // so this moves the check-side clock only — a no-op advance leaves .10 known
+    // and turns red on the first assert below.
+    let advance = client
+        .post(format!("{}/__test/clock", server.base))
+        .json(&serde_json::json!({ "advance_ms": 75 * 60 * 1000 }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(advance.status(), 204, "the test clock refused the advance");
 
     // Spend the GLOBAL 20/minute verification budget from four other addresses —
     // five wrong passwords each, the per-address admit bound. After this, only an

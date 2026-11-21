@@ -33,13 +33,16 @@ run intent-db cargo test --release --locked -p intent-db --no-fail-fast -- --ign
 run drills cargo test --release --locked -p intent-server \
     --no-fail-fast --test harness --test intake --test operator --test studio --test assets --test connections --test outbox_fencing --test notifier_pool --test readiness --test drill_notify_down --test drill_kill --test drill_db_down \
     -- --ignored
-# The flood drill advances the server clock through POST /__test/clock — a route that
-# exists only under the mutation-seams feature (K: no env var may move the shipped
-# clock). It runs here against a feature build; the default build above must refuse
-# to carry it (the drill itself asserts 404 without the env var).
+# The flood drill and the seed drill advance the server clock through
+# POST /__test/clock — a route that exists only under the mutation-seams feature
+# (K: no env var may move the shipped clock; F2: the seed drill's budget and
+# window edges are injected, not wall-clock). They run here against a feature
+# build; the default build above must refuse to carry the route (the flood drill
+# asserts 404 without the env var).
 run drills-clock cargo test --release --locked -p intent-server --features mutation-seams \
     --no-fail-fast --test operator \
-    -- --ignored a_flood_of_bad_session_cookies_is_limited_and_leaves_intake_alone
+    -- --ignored a_flood_of_bad_session_cookies_is_limited_and_leaves_intake_alone \
+    a_restart_seeds_only_in_window_sign_ins_under_the_current_credential
 # The attacks run against the default build — what ships — first: every guard must
 # refuse when INTENT_MUTATION is not even parsed (the variable is feature-gated).
 run attacks cargo test --release --locked -p intent-server \
