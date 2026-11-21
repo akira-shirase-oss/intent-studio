@@ -24,6 +24,9 @@ trap 'rm -rf "$stage"' EXIT
 root="$stage/intent-studio"
 mkdir -p "$root/bin" "$root/workspace" "$root/deploy"
 cp "$bin/intent-server" "$bin/intent-worker" "$root/bin/"
+# The binary the package ships carries no mutation seam — checked on the packaged copy,
+# not the build tree's, so a bad copy cannot slip past the check (B1).
+scripts/check-seams.sh "$root/bin/intent-server" >&2
 cp -R apps/workspace/build/. "$root/workspace/"
 cp deploy/intent-studio.service deploy/intent-studio.env.example deploy/Caddyfile "$root/deploy/"
 cp docs/OPERATOR_GUIDE.md "$root/"

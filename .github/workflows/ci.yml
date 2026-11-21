@@ -46,8 +46,14 @@ jobs:
       - run: scripts/check.sh
       # Its own step, not a line inside check.sh: an earlier set -e failure would skip
       # it otherwise, and the shipped binary carrying a seam is exactly what must not hide.
+      # `if: !cancelled()` so it runs even when check.sh is already red (B1).
       - name: Mutation seams absent from the shipped binary
+        if: ${{ !cancelled() }}
         run: scripts/check-seams.sh
+      # The check must be able to go red: a feature build must fail it.
+      - name: Prove the seam check refuses a mutated binary
+        if: ${{ !cancelled() }}
+        run: scripts/check-seams.sh --prove
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         if: failure()
         with:
@@ -78,8 +84,13 @@ jobs:
         run: sudo sysctl -w net.ipv4.ip_local_port_range="20000 50999"
       - run: scripts/drills.sh
       # The shipped binary is what the attacks just ran against — prove it carries no seam.
+      # `if: !cancelled()` so a red drills run can never hide it (B1).
       - name: Mutation seams absent from the shipped binary
+        if: ${{ !cancelled() }}
         run: scripts/check-seams.sh
+      - name: Prove the seam check refuses a mutated binary
+        if: ${{ !cancelled() }}
+        run: scripts/check-seams.sh --prove
       - name: Stack logs
         if: failure()
         run: docker compose -p intent-studio -f deploy/compose.yaml logs --no-color --tail 200
