@@ -67,9 +67,11 @@ run mutation cargo test --release --locked -p intent-server --features mutation-
 run generation-fails-seams cargo test --release --locked -p intent-server --features mutation-seams \
     --no-fail-fast --test generation_fails \
     -- --ignored seams::
-# Browser-confinement proofs (docs/BROWSER-CONFINEMENT.md): Linux-only — every
-# test compiles to nothing elsewhere, so the suite is CI's proof either way.
-run browser-confinement cargo test --release --locked -p intent-server --features mutation-seams \
+# Browser-confinement proofs (docs/BROWSER-CONFINEMENT.md): Linux-only — the
+# bodies live in intent-render (no C deps), where they compile-check under the
+# linux target on any host; on non-Linux they compile to nothing, so the suite
+# is CI's proof either way.
+run browser-confinement cargo test --release --locked -p intent-render --features mutation-seams \
     --no-fail-fast --test browser_confinement \
     -- --ignored --test-threads=1
 

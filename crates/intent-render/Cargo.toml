@@ -13,5 +13,18 @@ serde_json.workspace = true
 thiserror.workspace = true
 tokio.workspace = true
 
+# The hostile child the browser-confinement proofs run — exists only under the
+# feature so a shipped tree never carries it.
+[[bin]]
+name = "browser_probe"
+path = "src/bin/browser_probe.rs"
+required-features = ["mutation-seams"]
+
+[features]
+# Compiles the confinement proof artifacts (the probe binary; the test suite
+# arms the hole flags directly). intent-server's mutation-seams feature wires
+# the same name onto its own seams.
+mutation-seams = []
+
 [lints]
 workspace = true

@@ -20,15 +20,21 @@ cargo fmt --all --check
 
 step clippy
 cargo clippy --workspace --all-targets --locked -- -D warnings
-# Linux-only cfg (the worker's seccomp confinement; the server's non-dumpable setup and
-# probe) never compiles under macOS clippy; the check-only target pass needs no linker.
-# Scoped to intent-worker — all hand-rolled Linux code lives there (the server's items are
-# safe rustix calls), and a full-workspace pass would build C deps (ring via rustls) that
-# need a cross C toolchain most hosts lack. Skipped where the target is not installed —
-# CI runs the workspace-wide pass on Linux, where every cfg compiles natively.
+# Linux-only cfg (the worker's seccomp confinement; the render crate's browser
+# jail and its proof suite) never compiles under macOS clippy; the check-only
+# target pass needs no linker. Scoped to crates without C dependencies — a
+# full-workspace pass would build ring via rustls, which needs a cross C
+# toolchain most hosts lack. The intent-render pass builds --all-targets under
+# mutation-seams so the confinement PROOF file compiles too (CI 44891348696
+# found it had shipped uncompilable). Skipped where the target is not
+# installed — CI runs the workspace-wide pass on Linux, where every cfg
+# compiles natively.
 if rustup target list --installed 2>/dev/null | grep -qx "x86_64-unknown-linux-gnu"; then
     step "clippy (intent-worker, x86_64-unknown-linux-gnu)"
     cargo clippy -p intent-worker --all-targets --locked --target x86_64-unknown-linux-gnu -- -D warnings
+    step "clippy (intent-render + confinement proofs, x86_64-unknown-linux-gnu)"
+    cargo clippy -p intent-render --all-targets --locked --features mutation-seams \
+        --target x86_64-unknown-linux-gnu -- -D warnings
 fi
 
 step tests
