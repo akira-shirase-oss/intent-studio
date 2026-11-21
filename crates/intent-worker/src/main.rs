@@ -318,11 +318,14 @@ mod tests {
             output.status.code(),
             String::from_utf8_lossy(&output.stderr)
         );
-        // The child is this test binary re-run under a filter, so libtest's own lines share
-        // its stdout: the marker must appear as a line, not be the whole output.
+        // The child is this test binary re-run under a filter, so libtest's own lines
+        // share its stdout — under --test-threads=1 the banner `test ...confined...`
+        // is on the SAME line the child's write lands on, so line equality never sees
+        // a bare CONFINED. The marker with its own newline inside the stream is the
+        // honest proof: the child wrote it, wherever libtest put its text.
         let stdout = String::from_utf8_lossy(&output.stdout);
         assert!(
-            stdout.lines().any(|line| line == "CONFINED"),
+            stdout.contains("CONFINED\n"),
             "the confined child never printed CONFINED: {stdout}"
         );
     }
