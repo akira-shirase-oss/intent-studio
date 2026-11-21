@@ -7,6 +7,7 @@
 
 pub mod app;
 pub mod assets;
+pub mod checks;
 pub mod config;
 pub mod conn;
 pub mod error;

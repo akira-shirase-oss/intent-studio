@@ -87,6 +87,11 @@ pub enum Mutation {
     NoLeadDedup,
     /// `sign_in` mints the client-named token instead of a random one.
     ClientSessionToken,
+    /// The check runner records a caller-named hash, not the candidate's.
+    CheckAnyHash,
+    /// The check runner drops the `no_inline_svg` result before the verdict —
+    /// a bundle that should fail is recorded as merely incomplete.
+    AllowInlineSvg,
 }
 
 /// Which notification provider adapter to use.
@@ -369,9 +374,11 @@ impl Config {
             Some("no-egress-guard") => Some(Mutation::NoEgressGuard),
             Some("no-lead-dedup") => Some(Mutation::NoLeadDedup),
             Some("client-session-token") => Some(Mutation::ClientSessionToken),
+            Some("check-any-hash") => Some(Mutation::CheckAnyHash),
+            Some("allow-inline-svg") => Some(Mutation::AllowInlineSvg),
             Some(other) => {
                 env.problems.push(format!(
-                    "INTENT_MUTATION: expected one of no-session-check, no-session-delete, trust-any-forwarded, no-metrics-token, no-request-bound, no-content-type, no-egress-guard, no-lead-dedup, client-session-token; got {other:?}"
+                    "INTENT_MUTATION: expected one of no-session-check, no-session-delete, trust-any-forwarded, no-metrics-token, no-request-bound, no-content-type, no-egress-guard, no-lead-dedup, client-session-token, check-any-hash, allow-inline-svg; got {other:?}"
                 ));
                 None
             }

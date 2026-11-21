@@ -10,7 +10,7 @@
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
-pattern='INTENT_MUTATION|mutation-seams|no-session-check|no-session-delete|trust-any-forwarded|no-metrics-token|no-request-bound|no-content-type|no-egress-guard|no-lead-dedup|client-session-token|INTENT_TEST_CLOCK|__test/clock|advance_ms'
+pattern='INTENT_MUTATION|mutation-seams|no-session-check|no-session-delete|trust-any-forwarded|no-metrics-token|no-request-bound|no-content-type|no-egress-guard|no-lead-dedup|client-session-token|check-any-hash|allow-inline-svg|INTENT_TEST_CLOCK|__test/clock|advance_ms'
 
 # scan <binary>: 0 when the binary exists and carries no seam, 1 otherwise. grep reads
 # the file itself — `strings | grep -q` dies on SIGPIPE under pipefail exactly when it
@@ -58,7 +58,7 @@ if [ "${1:-}" = "--prove" ]; then
     # The refusal must cover the clock seam specifically (F6): a pass attributable
     # to any other pattern proves nothing about the clock strings. Each must be
     # present — and therefore detectable — in the feature binary itself.
-    for needle in INTENT_TEST_CLOCK __test/clock advance_ms; do
+    for needle in INTENT_TEST_CLOCK __test/clock advance_ms check-any-hash allow-inline-svg; do
         status=0
         LC_ALL=C grep -qaF "$needle" "$built" || status=$?
         if [ "$status" -ne 0 ]; then
@@ -66,7 +66,7 @@ if [ "${1:-}" = "--prove" ]; then
             exit 1
         fi
     done
-    echo "proof ok: the scan refuses a mutated binary (clock seam detected)"
+    echo "proof ok: the scan refuses a mutated binary (seam strings detected)"
     exit 0
 fi
 

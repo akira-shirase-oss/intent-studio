@@ -31,7 +31,7 @@ run() {
 # and nothing else exercises it.
 run intent-db cargo test --release --locked -p intent-db --no-fail-fast -- --ignored
 run drills cargo test --release --locked -p intent-server \
-    --no-fail-fast --test harness --test intake --test operator --test studio --test assets --test connections --test outbox_fencing --test notifier_pool --test readiness --test drill_notify_down --test drill_kill --test drill_db_down \
+    --no-fail-fast --test harness --test intake --test operator --test studio --test assets --test connections --test outbox_fencing --test notifier_pool --test readiness --test drill_notify_down --test drill_kill --test drill_db_down --test generation_fails \
     -- --ignored
 # The flood drill and the seed drill advance the server clock through
 # POST /__test/clock — a route that exists only under the mutation-seams feature
@@ -55,6 +55,13 @@ run attacks cargo test --release --locked -p intent-server \
 run mutation cargo test --release --locked -p intent-server --features mutation-seams \
     --no-fail-fast --test mutation \
     -- --ignored
+# The check-suite seams are inside the drill file they protect (the proofs live
+# beside the path they mutate): under the feature they run, in the default
+# build they do not exist — which is itself the proof the shipped build cannot
+# carry them.
+run generation-fails-seams cargo test --release --locked -p intent-server --features mutation-seams \
+    --no-fail-fast --test generation_fails \
+    -- --ignored seams::
 
 if [ "$failed" -ne 0 ]; then
     echo "drills.sh: one or more suites FAILED (each is marked above)" >&2
