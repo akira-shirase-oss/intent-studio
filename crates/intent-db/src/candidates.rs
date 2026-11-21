@@ -29,6 +29,8 @@ pub struct CandidateRow {
     pub brief_id: BriefId,
     /// The bundle's SHA-256 over its canonical framing.
     pub bundle_sha256: ContentHash,
+    /// The page tree's own SHA-256 (D-010); `None` only on pre-0010 rows.
+    pub page_tree_sha256: Option<ContentHash>,
     /// The validated page tree that produced it.
     pub tree: serde_json::Value,
     /// The component set (`quote-request@0`).
@@ -75,10 +77,9 @@ pub struct NewCheckRecord<'a> {
     pub engine: &'a str,
     /// `static` or a viewport like `360x800`.
     pub viewport: &'a str,
-    /// Per-check outcomes.
+    /// Per-check outcomes — the verdict is derived from these, never passed
+    /// in (I2-4: a caller cannot claim a pass the evidence does not hold).
     pub results: &'a serde_json::Value,
-    /// `pass`, `fail` or `pending`.
-    pub verdict: &'a str,
 }
 
 /// A stored check record.
@@ -88,6 +89,8 @@ pub struct CheckRecordRow {
     pub id: Uuid,
     /// The candidate checked.
     pub candidate_id: Uuid,
+    /// The candidate's tenant — the record's scope (I2-7).
+    pub tenant_id: TenantId,
     /// The bundle the results describe — the candidate's own hash, always.
     pub bundle_sha256: ContentHash,
     /// The suite and its version (`d-022@0`).
@@ -116,6 +119,10 @@ fn candidate_row(row: &sqlx::postgres::PgRow) -> Result<CandidateRow, DbError> {
         tenant_id: TenantId::from_uuid(row.try_get("tenant_id").map_err(DbError::Other)?),
         brief_id: BriefId::from_uuid(row.try_get("brief_id").map_err(DbError::Other)?),
         bundle_sha256: content_hash(row, "bundle_sha256")?,
+        page_tree_sha256: row
+            .try_get::<Option<Vec<u8>>, _>("page_tree_sha256")
+            .map_err(DbError::Other)?
+            .and_then(|b| ContentHash::from_slice(&b)),
         tree: row.try_get("tree").map_err(DbError::Other)?,
         component_set: row.try_get("component_set").map_err(DbError::Other)?,
         builder: row.try_get("builder").map_err(DbError::Other)?,
@@ -128,6 +135,7 @@ fn check_row(row: &sqlx::postgres::PgRow) -> Result<CheckRecordRow, DbError> {
     Ok(CheckRecordRow {
         id: row.try_get("id").map_err(DbError::Other)?,
         candidate_id: row.try_get("candidate_id").map_err(DbError::Other)?,
+        tenant_id: TenantId::from_uuid(row.try_get("tenant_id").map_err(DbError::Other)?),
         bundle_sha256: content_hash(row, "bundle_sha256")?,
         suite: row.try_get("suite").map_err(DbError::Other)?,
         engine: row.try_get("engine").map_err(DbError::Other)?,
@@ -146,20 +154,27 @@ impl Db {
         new: &NewCandidate<'_>,
         audit: &AuditEntry<'_>,
     ) -> Result<Option<CandidateRow>, DbError> {
+        // The tree hash is derived, never supplied — the provenance column
+        // names the exact bytes the approval binds (D-010).
+        let tree_bytes = serde_json::to_vec(new.tree)
+            .map_err(|_| DbError::Other(sqlx::Error::Protocol("tree not json".into())))?;
+        let tree_hash = ContentHash::of(&tree_bytes);
         let mut tx = self.pool.begin().await.map_err(classify)?;
         let row = sqlx::query(
             "INSERT INTO candidates
-             (id, tenant_id, brief_id, bundle_sha256, tree, component_set, builder, model)
-             SELECT $1, t.id, b.id, $4, $5, $6, $7, $8
+             (id, tenant_id, brief_id, bundle_sha256, page_tree_sha256, tree,
+              component_set, builder, model)
+             SELECT $1, t.id, b.id, $4, $5, $6, $7, $8, $9
              FROM tenants t JOIN briefs b ON b.tenant_id = t.id AND b.id = $3
              WHERE t.id = $2
-             RETURNING id, tenant_id, brief_id, bundle_sha256, tree, component_set,
-                       builder, model, created_at",
+             RETURNING id, tenant_id, brief_id, bundle_sha256, page_tree_sha256, tree,
+                       component_set, builder, model, created_at",
         )
         .bind(new.id)
         .bind(new.tenant.as_uuid())
         .bind(new.brief.as_uuid())
         .bind(new.bundle_sha256.as_bytes().as_slice())
+        .bind(tree_hash.as_bytes().as_slice())
         .bind(new.tree)
         .bind(intent_domain::page_tree::COMPONENT_SET)
         .bind(new.builder)
@@ -183,8 +198,8 @@ impl Db {
         id: Uuid,
     ) -> Result<Option<CandidateRow>, DbError> {
         let row = sqlx::query(
-            "SELECT id, tenant_id, brief_id, bundle_sha256, tree, component_set, builder,
-                    model, created_at
+            "SELECT id, tenant_id, brief_id, bundle_sha256, page_tree_sha256, tree,
+                    component_set, builder, model, created_at
              FROM candidates WHERE id = $1 AND tenant_id = $2",
         )
         .bind(id)
@@ -197,19 +212,37 @@ impl Db {
 
     /// Records one backend cell's results against a candidate. `bundle_sha256`
     /// is the hash the caller believes ran; the composite foreign key makes a
-    /// wrong answer a refused write, not a quiet mismatch (D-010).
+    /// wrong answer a refused write, not a quiet mismatch (D-010). The verdict
+    /// is derived here from the results themselves — unparseable or evidence-
+    /// free results are refused (I2-4).
     pub async fn insert_check_record(
         &self,
         new: &NewCheckRecord<'_>,
         audit: &AuditEntry<'_>,
     ) -> Result<CheckRecordRow, DbError> {
+        let results: Vec<intent_domain::checks::CheckResult> =
+            serde_json::from_value(new.results.clone()).map_err(|_| {
+                DbError::Other(sqlx::Error::Protocol(
+                    "results not a check-results array".into(),
+                ))
+            })?;
+        if results.is_empty() {
+            return Err(DbError::Other(sqlx::Error::Protocol(
+                "results empty".into(),
+            )));
+        }
+        let verdict = intent_domain::checks::CheckVerdict::of_results(&results);
+        // The tenant is selected from the candidate, never supplied — a record
+        // can only ever land under its candidate's own scope (I2-7).
         let mut tx = self.pool.begin().await.map_err(classify)?;
         let row = sqlx::query(
             "INSERT INTO check_records
-             (id, candidate_id, bundle_sha256, suite, engine, viewport, results, verdict)
-             VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
-             RETURNING id, candidate_id, bundle_sha256, suite, engine, viewport, results,
-                       verdict, ran_at",
+             (id, candidate_id, tenant_id, bundle_sha256, suite, engine, viewport,
+              results, verdict)
+             SELECT $1, c.id, c.tenant_id, $3, $4, $5, $6, $7, $8
+             FROM candidates c WHERE c.id = $2
+             RETURNING id, candidate_id, tenant_id, bundle_sha256, suite, engine,
+                       viewport, results, verdict, ran_at",
         )
         .bind(new.id)
         .bind(new.candidate_id)
@@ -218,7 +251,7 @@ impl Db {
         .bind(new.engine)
         .bind(new.viewport)
         .bind(new.results)
-        .bind(new.verdict)
+        .bind(verdict.as_str())
         .fetch_one(&mut *tx)
         .await
         .map_err(classify)?;
@@ -231,8 +264,8 @@ impl Db {
     /// A candidate's check records, newest first.
     pub async fn check_records(&self, candidate_id: Uuid) -> Result<Vec<CheckRecordRow>, DbError> {
         let rows = sqlx::query(
-            "SELECT id, candidate_id, bundle_sha256, suite, engine, viewport, results,
-                    verdict, ran_at
+            "SELECT id, candidate_id, tenant_id, bundle_sha256, suite, engine, viewport,
+                    results, verdict, ran_at
              FROM check_records
              WHERE candidate_id = $1 ORDER BY ran_at DESC, id DESC",
         )

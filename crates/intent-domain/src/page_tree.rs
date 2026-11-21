@@ -414,6 +414,37 @@ fn visit_section<'a>(section: &'a Section, visit: &mut dyn FnMut(Slot<'a>)) {
     }
 }
 
+/// A tree [`validate`] approved with zero problems — the only form a builder
+/// may consume, so an unacceptable link target is unbuildable, not escaped
+/// into bytes (I2-2). The field is private: nothing outside this module can
+/// mint one.
+#[derive(Debug, Clone)]
+pub struct ValidatedTree(PageTree);
+
+impl ValidatedTree {
+    /// The only constructor: `tree` under `ctx`, problem-free. The problems
+    /// come back as the error, unchanged.
+    pub fn validate(tree: PageTree, ctx: SpecContext<'_>) -> Result<Self, Vec<Problem>> {
+        let problems = validate(&tree, ctx);
+        if problems.is_empty() {
+            Ok(Self(tree))
+        } else {
+            Err(problems)
+        }
+    }
+
+    /// The approved tree.
+    pub fn tree(&self) -> &PageTree {
+        &self.0
+    }
+
+    /// Unwraps back to the raw tree — for callers that record it, never for
+    /// building around the guarantee.
+    pub fn into_tree(self) -> PageTree {
+        self.0
+    }
+}
+
 /// Every problem with `tree` under `ctx`; empty when it validates.
 pub fn validate(tree: &PageTree, ctx: SpecContext<'_>) -> Vec<Problem> {
     let mut v = Validator {

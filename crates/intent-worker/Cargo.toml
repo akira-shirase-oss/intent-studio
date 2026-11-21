@@ -8,10 +8,13 @@ license.workspace = true
 publish.workspace = true
 
 [dependencies]
-# PNG and JPEG only, no threads (one job per process, CPU-limited).
+# The check job's HTML parsing (I2-1); PNG and JPEG only for assets, no
+# threads (one job per process, CPU-limited).
+html5ever.workspace = true
 image = { workspace = true }
 intent-domain.workspace = true
 intent-render.workspace = true
+markup5ever_rcdom.workspace = true
 rlimit.workspace = true
 roxmltree.workspace = true
 serde_json.workspace = true

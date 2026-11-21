@@ -33,6 +33,7 @@ hashlink = "0.11"
 hex = "0.4.3"
 http-body-util = "0.1.5"
 # The asset worker's decoders (intent-worker only; scripts/check-architecture.sh, A6).
+html5ever = "0.35.0"
 image = { version = "0.25.10", default-features = false, features = ["png", "jpeg"] }
 # Driven directly for connection-level bounds (header-read timeout, connection cap); axum::serve
 # exposes none of them.
@@ -41,6 +42,7 @@ hyper-util = { version = "0.1.21", features = ["tokio", "service"] }
 # Plain HTTP only in I0: the provider fixture is local. TLS (rustls) arrives with the first
 # real provider adapter, so no TLS stack is compiled before something needs it.
 reqwest = { version = "0.13.5", default-features = false, features = ["json"] }
+markup5ever_rcdom = "0.35.0"
 rlimit = "0.11.0"
 roxmltree = "0.21.2"
 # TLS for the egress guard only: rustls with the ring provider (one TLS stack, no OpenSSL, no

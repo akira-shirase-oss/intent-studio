@@ -23,6 +23,10 @@ pub const MAX_PATH_BYTES: usize = 200;
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct Bundle {
     files: BTreeMap<String, Vec<u8>>,
+    /// Σ `4 + path.len() + 8 + bytes.len()` — the framing's own length, kept
+    /// so [`Bundle::put`] can refuse to ever exceed [`MAX_BUNDLE_BYTES`]
+    /// (64 × 1 MiB would, otherwise, beat the 8 MiB cap).
+    encoded_len: usize,
 }
 
 /// Why bytes are not a bundle. Stable codes.
@@ -74,6 +78,18 @@ impl Bundle {
         if self.files.len() >= MAX_FILES && !self.files.contains_key(path) {
             return Err(BundleError::TooManyFiles);
         }
+        let old_entry = self
+            .files
+            .get(path)
+            .map_or(0, |old| 12 + path.len() + old.len());
+        let new_len = self
+            .encoded_len
+            .saturating_sub(old_entry)
+            .saturating_add(12 + path.len() + bytes.len());
+        if new_len > MAX_BUNDLE_BYTES {
+            return Err(BundleError::TooLarge);
+        }
+        self.encoded_len = new_len;
         self.files.insert(path.to_owned(), bytes);
         Ok(())
     }
@@ -110,6 +126,7 @@ impl Bundle {
             return Err(BundleError::TooLarge);
         }
         let mut bundle = Self::new();
+        let mut previous: Option<String> = None;
         let mut rest = blob;
         while !rest.is_empty() {
             let Some((len, tail)) = rest.split_at_checked(4) else {
@@ -130,7 +147,14 @@ impl Bundle {
             let Some((bytes, tail)) = tail.split_at_checked(len) else {
                 return Err(BundleError::Malformed);
             };
+            // Canonical only: paths strictly increase — a duplicate would
+            // silently overwrite in the map and let a worker check only the
+            // last copy; a reorder would make `encode(decode(b)) != b`.
+            if matches!(&previous, Some(prev) if path <= prev.as_str()) {
+                return Err(BundleError::Malformed);
+            }
             bundle.put(path, bytes.to_vec())?;
+            previous = Some(path.to_owned());
             rest = tail;
         }
         Ok(bundle)
@@ -185,5 +209,54 @@ mod tests {
             Bundle::decode(&vec![0; MAX_BUNDLE_BYTES + 1]),
             Err(BundleError::TooLarge)
         );
+    }
+
+    /// Framing one path/content pair, for hand-written non-canonical inputs.
+    fn frame(path: &str, bytes: &[u8]) -> Vec<u8> {
+        // Bounded by `put` below `MAX_PATH_BYTES` (200) — fits u32 trivially.
+        #[expect(
+            clippy::cast_possible_truncation,
+            reason = "path length is bounded at 200 bytes by put"
+        )]
+        let mut out = (path.len() as u32).to_be_bytes().to_vec();
+        out.extend_from_slice(path.as_bytes());
+        out.extend_from_slice(&(bytes.len() as u64).to_be_bytes());
+        out.extend_from_slice(bytes);
+        out
+    }
+
+    #[test]
+    fn non_canonical_framings_are_refused() {
+        // Duplicate path: `put` would silently keep only the second copy — the
+        // worker would then check bytes the hash never addressed.
+        let mut dup = frame("a.html", b"one");
+        dup.extend_from_slice(&frame("a.html", b"two"));
+        assert_eq!(Bundle::decode(&dup), Err(BundleError::Malformed));
+        // Out of order: decode must not reorder — `encode(decode(b)) == b`.
+        let mut swapped = frame("z.html", b"z");
+        swapped.extend_from_slice(&frame("a.html", b"a"));
+        assert_eq!(Bundle::decode(&swapped), Err(BundleError::Malformed));
+        // Canonical bytes round-trip to themselves exactly.
+        let mut bundle = Bundle::new();
+        bundle.put("index.html", b"a".to_vec()).unwrap();
+        bundle.put("z.html", b"z".to_vec()).unwrap();
+        let bytes = bundle.encode();
+        assert_eq!(Bundle::decode(&bytes).unwrap().encode(), bytes);
+    }
+
+    #[test]
+    fn the_bundle_bound_is_enforced_at_encode() {
+        // 64 × 1 MiB files each pass their own bound — the framing's must not.
+        let mut bundle = Bundle::new();
+        let mut fills = 0usize;
+        loop {
+            let path = format!("f{fills}.bin");
+            match bundle.put(&path, vec![0; MAX_FILE_BYTES]) {
+                Ok(()) => fills += 1,
+                Err(BundleError::TooLarge) => break,
+                Err(other) => panic!("unexpected refusal: {other}"),
+            }
+        }
+        assert!(fills > 0 && bundle.encode().len() <= MAX_BUNDLE_BYTES);
     }
 }

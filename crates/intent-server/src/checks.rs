@@ -10,7 +10,9 @@
 
 use intent_db::{CandidateRow, Db, DbError};
 use intent_domain::{
-    checks::{CheckKind, CheckReport, CheckResult, CheckVerdict, Engine, SUITE},
+    checks::{
+        CheckBackend, CheckKind, CheckReport, CheckResult, CheckStatus, CheckVerdict, Engine, SUITE,
+    },
     content::ContentHash,
 };
 use intent_render::{AssetKind, Driver, WorkerRefusal};
@@ -32,6 +34,10 @@ pub enum CheckError {
     /// The check worker died, timed out or answered outside the protocol.
     #[error("render_crashed")]
     RenderCrashed,
+    /// The stored bytes are not a canonical bundle — a deterministic defect,
+    /// never a retryable crash (D-021, I2-6).
+    #[error("bundle_malformed")]
+    BundleMalformed,
     /// The worker could not run the job (busy, unavailable, oversized).
     #[error("check_unavailable")]
     CheckUnavailable,
@@ -101,28 +107,30 @@ pub async fn run(
         .run(AssetKind::Check, &blob)
         .await
         .map_err(worker_error)?;
-    let report: CheckReport =
+    let mut report: CheckReport =
         serde_json::from_slice(&answer.output).map_err(|_| CheckError::ReportMalformed)?;
     if report.suite != SUITE {
         return Err(CheckError::ReportMalformed);
     }
     // The report is untrusted worker output: it must answer for every check the
     // suite version names — a missing check is a laundered failure, not a skip.
-    let mut results = report.results;
-    let complete = CheckKind::ALL
-        .iter()
-        .all(|kind| results.iter().filter(|r| r.check == *kind).count() == 1)
-        && results.len() == CheckKind::ALL.len();
-    if !complete {
-        return Err(CheckError::ReportMalformed);
-    }
     // `allow-inline-svg`: the seam drops the check's result — a bundle that
     // should fail is recorded as merely incomplete, which is exactly what the
     // drill refuses to let stand.
     if crate::mutated!(config, crate::config::Mutation::AllowInlineSvg) {
-        results.retain(|r| r.check != CheckKind::NoInlineSvg);
+        report.results.retain(|r| r.check != CheckKind::NoInlineSvg);
     }
-    let verdict = CheckVerdict::of(&results);
+    // Until a browser engine produces them, every browser check must be
+    // Pending: the static worker may not claim a browser pass, and a verdict
+    // exists only over complete, well-formed evidence (I2-3, I2-4).
+    if report
+        .results
+        .iter()
+        .any(|r| r.check.backend() == CheckBackend::Browser && r.status != CheckStatus::Pending)
+    {
+        return Err(CheckError::ReportMalformed);
+    }
+    let verdict = CheckVerdict::of(&report).ok_or(CheckError::ReportMalformed)?;
     // The record binds the candidate's own hash. The seam substitutes a
     // caller-supplied one — the composite FK turns it into a refused write.
     let hash = if crate::mutated!(config, crate::config::Mutation::CheckAnyHash) {
@@ -130,7 +138,7 @@ pub async fn run(
     } else {
         candidate.bundle_sha256
     };
-    write_record(db, &candidate, hash, &results, verdict).await?;
+    write_record(db, &candidate, hash, &report.results).await?;
     Ok(match verdict {
         CheckVerdict::Pass => SuiteOutcome::Pass,
         CheckVerdict::Fail => SuiteOutcome::ChecksFailed,
@@ -139,12 +147,13 @@ pub async fn run(
 }
 
 /// One `static` cell's row; browser cells get rows when their backend exists.
+/// The verdict is the DB layer's own derivation from the results — never
+/// caller-supplied (I2-4).
 async fn write_record(
     db: &Db,
     candidate: &CandidateRow,
     hash: ContentHash,
     results: &[CheckResult],
-    verdict: CheckVerdict,
 ) -> Result<(), CheckError> {
     let results = serde_json::to_value(results).map_err(|_| CheckError::ReportMalformed)?;
     db.insert_check_record(
@@ -156,7 +165,6 @@ async fn write_record(
             engine: Engine::Static.as_str(),
             viewport: "static",
             results: &results,
-            verdict: verdict.as_str(),
         },
         &AUDIT,
     )
@@ -173,9 +181,8 @@ async fn write_record(
 
 fn worker_error(refusal: WorkerRefusal) -> CheckError {
     match refusal {
-        WorkerRefusal::WorkerCrashed | WorkerRefusal::WorkerTimeout | WorkerRefusal::Malformed => {
-            CheckError::RenderCrashed
-        }
+        WorkerRefusal::WorkerCrashed | WorkerRefusal::WorkerTimeout => CheckError::RenderCrashed,
+        WorkerRefusal::Malformed => CheckError::BundleMalformed,
         _ => CheckError::CheckUnavailable,
     }
 }

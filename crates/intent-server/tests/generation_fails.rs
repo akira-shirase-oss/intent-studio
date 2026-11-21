@@ -16,7 +16,7 @@ use std::{path::PathBuf, time::Duration};
 
 use intent_db::{AuditEntry, DEMO_TENANT as DEMO, Db, PoolLimits};
 use intent_domain::{
-    baseline::{self, BuildError},
+    baseline,
     bundle::Bundle,
     checks::{CheckKind, CheckStatus},
     content::ContentHash,
@@ -148,12 +148,28 @@ async fn brief_and_candidate(
     .unwrap()
 }
 
+/// The only shape `build` accepts: validation's own mint, with the drill's
+/// brief and empty facts (the fixture tree references none).
+fn vtree() -> intent_domain::page_tree::ValidatedTree {
+    let brief = brief_value();
+    let facts = FactLookup::new();
+    intent_domain::page_tree::ValidatedTree::validate(
+        tree(),
+        intent_domain::page_tree::SpecContext {
+            brief: &brief,
+            facts: &facts,
+            today: time::OffsetDateTime::now_utc().date(),
+        },
+    )
+    .unwrap_or_else(|problems| panic!("the drill fixture must validate: {problems:?}"))
+}
+
 /// Builds the baseline and puts its blob in `store` — the path every candidate
 /// takes: the same tree gives the same bytes, proved byte-for-byte.
 async fn baseline_bundle(store: &ContentStore) -> (Bundle, ContentHash) {
     let today = time::OffsetDateTime::now_utc().date();
-    let bundle = baseline::build(&tree(), &FactLookup::new(), today).unwrap();
-    let again = baseline::build(&tree(), &FactLookup::new(), today).unwrap();
+    let bundle = baseline::build(&vtree(), &FactLookup::new(), today).unwrap();
+    let again = baseline::build(&vtree(), &FactLookup::new(), today).unwrap();
     assert_eq!(
         bundle.encode(),
         again.encode(),
@@ -220,13 +236,22 @@ async fn inline_svg_is_checks_failed_and_the_record_names_it() {
     let db = Db::connect_lazy(&test.url, PoolLimits::default()).unwrap();
     let store = store();
     let today = time::OffsetDateTime::now_utc().date();
-    let mut bundle = baseline::build(&tree(), &FactLookup::new(), today).unwrap();
+    let mut bundle = baseline::build(&vtree(), &FactLookup::new(), today).unwrap();
     // What a hostile or buggy generator would ship: the check must catch it in
-    // the bytes, not trust that the builder never would.
+    // the bytes, not trust that the builder never would. The page carries the
+    // fixed prologue so `no_inline_svg` itself — not the contract's prologue
+    // arm — is what names the failure.
     bundle
         .put(
             "index.html",
-            b"<!doctype html><svg onload=alert(1)><rect/></svg>".to_vec(),
+            format!(
+                "{}{}",
+                intent_domain::baseline::PROLOGUE,
+                "<title>x</title><meta name=\"description\" content=\"x\">\
+                 <link rel=\"stylesheet\" href=\"/style.css\"></head><body>\
+                 <svg onload=alert(1)><rect/></svg></body></html>"
+            )
+            .into_bytes(),
         )
         .unwrap();
     let hash = store.put(bundle.encode()).await.unwrap();
@@ -289,13 +314,14 @@ async fn a_check_record_cannot_describe_a_different_hash() {
     let (_, hash_a) = baseline_bundle(&store).await;
     // A second candidate over different bytes: the wrong-hash temptation.
     let today = time::OffsetDateTime::now_utc().date();
-    let mut other = baseline::build(&tree(), &FactLookup::new(), today).unwrap();
+    let mut other = baseline::build(&vtree(), &FactLookup::new(), today).unwrap();
     other.put("index.html", b"different".to_vec()).unwrap();
     let hash_b = store.put(other.encode()).await.unwrap();
     let candidate = brief_and_candidate(&db, &tree(), hash_a).await;
 
     // The write layer itself: a record for candidate A naming B's bundle is
-    // refused by the pair foreign key, whatever asked for it.
+    // refused by the pair foreign key, whatever asked for it. Real results —
+    // the verdict is derived, not supplied (I2-4).
     let error = db
         .insert_check_record(
             &intent_db::NewCheckRecord {
@@ -305,8 +331,7 @@ async fn a_check_record_cannot_describe_a_different_hash() {
                 suite: intent_domain::checks::SUITE,
                 engine: "static",
                 viewport: "static",
-                results: &json!([]),
-                verdict: "pass",
+                results: &json!([{ "check": "no_inline_svg", "status": "pass" }]),
             },
             &AUDIT,
         )
@@ -316,6 +341,25 @@ async fn a_check_record_cannot_describe_a_different_hash() {
         error.sqlstate().as_deref(),
         Some("23503"),
         "a record for a different hash must be refused by the binding, not by luck"
+    );
+    // And an empty results array has no path to a `pass` row: the evidence
+    // itself refuses before the foreign key is ever consulted.
+    assert!(
+        db.insert_check_record(
+            &intent_db::NewCheckRecord {
+                id: Uuid::now_v7(),
+                candidate_id: candidate.id,
+                bundle_sha256: hash_a,
+                suite: intent_domain::checks::SUITE,
+                engine: "static",
+                viewport: "static",
+                results: &json!([]),
+            },
+            &AUDIT,
+        )
+        .await
+        .is_err(),
+        "empty evidence cannot be written as a pass"
     );
     test.drop_database().await;
 }
@@ -417,7 +461,8 @@ async fn a_report_missing_a_check_is_malformed_not_a_record() {
     test.drop_database().await;
 }
 
-/// A tree schema parse that cannot be tricked: `BuildError`, not a site.
+/// A tree schema parse that cannot be tricked: no `ValidatedTree` mints from
+/// it, so the build door is never reached (I2-2).
 #[test]
 fn a_tree_referencing_an_unapproved_fact_is_refused_by_name() {
     let mut t = tree();
@@ -429,13 +474,20 @@ fn a_tree_referencing_an_unapproved_fact_is_refused_by_name() {
             heading: None,
             fact: intent_domain::page_tree::FactRef { fact: id },
         });
-    let error = baseline::build(
-        &t,
-        &FactLookup::new(),
-        time::OffsetDateTime::now_utc().date(),
-    )
-    .unwrap_err();
-    assert_eq!(error, BuildError::UnknownFact(id));
+    let brief = brief_value();
+    let facts = FactLookup::new();
+    assert!(
+        intent_domain::page_tree::ValidatedTree::validate(
+            t,
+            intent_domain::page_tree::SpecContext {
+                brief: &brief,
+                facts: &facts,
+                today: time::OffsetDateTime::now_utc().date(),
+            },
+        )
+        .is_err(),
+        "an unapproved fact reference must fail validation — no tree to build"
+    );
 }
 
 /// The mutation proofs, in the same file the protections live in: the seam only
@@ -445,28 +497,31 @@ fn a_tree_referencing_an_unapproved_fact_is_refused_by_name() {
 mod seams {
     use super::*;
 
-    /// `allow-inline-svg`: the seam drops the check result — a bundle that must
-    /// fail is recorded as merely incomplete. The vulnerable outcome is what we
-    /// assert: with the guard off, `checks_failed` is laundered to `pending`.
-    /// The unseamed drill above is the pair that keeps this honest.
+    /// `allow-inline-svg`: the seam drops the check's result — the report is
+    /// now incomplete, and completeness is enforced: the run is refused as
+    /// `report_malformed`, no record is written. The fixture fails ONLY
+    /// `no_inline_svg` (a valid prologue page with one `<svg>`), so nothing
+    /// else can produce the refusal — the dropped evidence is what did it.
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
     #[ignore = "needs the stack: scripts/stack.sh up (run by scripts/drills.sh)"]
-    async fn allow_inline_svg_launders_a_failure_into_pending() {
+    async fn allow_inline_svg_is_caught_by_report_completeness() {
         let test = TestDb::create(1).await;
         let db = Db::connect_lazy(&test.url, PoolLimits::default()).unwrap();
         let store = store();
         let today = time::OffsetDateTime::now_utc().date();
-        let mut bundle = baseline::build(&tree(), &FactLookup::new(), today).unwrap();
-        bundle
-            .put(
-                "index.html",
-                b"<!doctype html><svg onload=alert(1) />".to_vec(),
-            )
-            .unwrap();
+        let mut bundle = baseline::build(&vtree(), &FactLookup::new(), today).unwrap();
+        let payload = format!(
+            "{}{}",
+            intent_domain::baseline::PROLOGUE,
+            "<title>x</title><meta name=\"description\" content=\"x\">\
+             <link rel=\"stylesheet\" href=\"/style.css\"></head><body>\
+             <svg onload=alert(1)></svg></body></html>"
+        );
+        bundle.put("index.html", payload.into_bytes()).unwrap();
         let hash = store.put(bundle.encode()).await.unwrap();
         let candidate = brief_and_candidate(&db, &tree(), hash).await;
 
-        let outcome = checks::run(
+        let error = checks::run(
             &config(Some("allow-inline-svg")),
             &db,
             &store,
@@ -476,18 +531,12 @@ mod seams {
             None,
         )
         .await
-        .unwrap();
-        // The vulnerable outcome: the svg check never ran, so the verdict is the
-        // laundered `pending` — not the `checks_failed` the bytes earned.
-        assert_eq!(outcome, SuiteOutcome::Pending);
-        let records = db.check_records(candidate.id).await.unwrap();
-        assert_eq!(records[0].verdict, "pending");
-        let results: Vec<intent_domain::checks::CheckResult> =
-            serde_json::from_value(records[0].results.clone()).unwrap();
+        .unwrap_err();
         assert!(
-            results.iter().all(|r| r.check != CheckKind::NoInlineSvg),
-            "the seam dropped the check's evidence"
+            matches!(error, CheckError::ReportMalformed),
+            "a dropped check result must be malformed, got {error}"
         );
+        assert!(db.check_records(candidate.id).await.unwrap().is_empty());
         test.drop_database().await;
     }
 
@@ -502,7 +551,7 @@ mod seams {
         let store = store();
         let (_, hash_a) = baseline_bundle(&store).await;
         let today = time::OffsetDateTime::now_utc().date();
-        let mut other = baseline::build(&tree(), &FactLookup::new(), today).unwrap();
+        let mut other = baseline::build(&vtree(), &FactLookup::new(), today).unwrap();
         other.put("index.html", b"other".to_vec()).unwrap();
         let hash_b = store.put(other.encode()).await.unwrap();
         let candidate = brief_and_candidate(&db, &tree(), hash_a).await;

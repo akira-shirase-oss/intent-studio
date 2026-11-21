@@ -157,8 +157,12 @@ pub enum CheckStatus {
     Pending,
 }
 
+/// `detail`'s bound — a result explains itself in a sentence, never content.
+pub const MAX_DETAIL_BYTES: usize = 512;
+
 /// One check's outcome on a bundle.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct CheckResult {
     /// Which check.
     pub check: CheckKind,
@@ -201,9 +205,30 @@ impl CheckVerdict {
         }
     }
 
-    /// The verdict over `results`: a failure dominates; a pending means the
-    /// suite is incomplete.
-    pub fn of(results: &[CheckResult]) -> Self {
+    /// The verdict over a complete report — `None` when the evidence is
+    /// incomplete: a missing kind, a duplicate, an extra, or an oversized
+    /// `detail`. An empty result set has no path to [`Self::Pass`]: pass is
+    /// derived from evidence, never assumed (I2-4).
+    pub fn of(report: &CheckReport) -> Option<Self> {
+        let results = &report.results;
+        let complete = CheckKind::ALL
+            .iter()
+            .all(|kind| results.iter().filter(|r| r.check == *kind).count() == 1)
+            && results.len() == CheckKind::ALL.len()
+            && results
+                .iter()
+                .all(|r| r.detail.as_deref().map_or(0, str::len) <= MAX_DETAIL_BYTES);
+        if !complete {
+            return None;
+        }
+        Some(Self::of_results(results))
+    }
+
+    /// The verdict over results already proved complete — what the DB layer
+    /// derives for itself so no caller can supply a verdict the evidence
+    /// doesn't support.
+    #[must_use]
+    pub fn of_results(results: &[CheckResult]) -> Self {
         if results.iter().any(|r| r.status == CheckStatus::Fail) {
             Self::Fail
         } else if results.iter().any(|r| r.status == CheckStatus::Pending) {
@@ -218,6 +243,13 @@ impl CheckVerdict {
 mod tests {
     use super::*;
 
+    fn report(results: Vec<CheckResult>) -> CheckReport {
+        CheckReport {
+            suite: SUITE.into(),
+            results,
+        }
+    }
+
     #[test]
     fn the_verdict_never_launders_a_pending() {
         let pass = |check| CheckResult {
@@ -226,14 +258,49 @@ mod tests {
             detail: None,
         };
         assert_eq!(
-            CheckVerdict::of(&CheckKind::ALL.map(pass)),
-            CheckVerdict::Pass
+            CheckVerdict::of(&report(CheckKind::ALL.map(pass).to_vec())),
+            Some(CheckVerdict::Pass)
         );
-        let mut results = CheckKind::ALL.map(pass);
+        let mut results = CheckKind::ALL.map(pass).to_vec();
         results[3].status = CheckStatus::Pending;
         results[3].detail = Some("browser backend not built".into());
-        assert_eq!(CheckVerdict::of(&results), CheckVerdict::Pending);
+        assert_eq!(
+            CheckVerdict::of(&report(results.clone())),
+            Some(CheckVerdict::Pending)
+        );
         results[3].status = CheckStatus::Fail;
-        assert_eq!(CheckVerdict::of(&results), CheckVerdict::Fail);
+        assert_eq!(CheckVerdict::of(&report(results)), Some(CheckVerdict::Fail));
+    }
+
+    #[test]
+    fn no_evidence_no_pass() {
+        // An empty or short report has no path to Pass (I2-4).
+        assert_eq!(CheckVerdict::of(&report(vec![])), None);
+        let pass = |check| CheckResult {
+            check,
+            status: CheckStatus::Pass,
+            detail: None,
+        };
+        // Missing one kind, a duplicate, an extra, an oversized detail.
+        assert_eq!(
+            CheckVerdict::of(&report(CheckKind::ALL.map(pass)[..7].to_vec())),
+            None
+        );
+        let mut dup = CheckKind::ALL.map(pass).to_vec();
+        dup.push(pass(CheckKind::NoInlineSvg));
+        assert_eq!(CheckVerdict::of(&report(dup)), None);
+        let mut big = CheckKind::ALL.map(pass).to_vec();
+        big[0].detail = Some("x".repeat(MAX_DETAIL_BYTES + 1));
+        assert_eq!(CheckVerdict::of(&report(big)), None);
+    }
+
+    #[test]
+    fn check_result_refuses_unknown_fields() {
+        assert!(
+            serde_json::from_str::<CheckResult>(
+                r#"{"check":"no_inline_svg","status":"pass","extra":1}"#
+            )
+            .is_err()
+        );
     }
 }

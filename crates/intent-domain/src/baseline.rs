@@ -24,11 +24,36 @@ use crate::{
     bundle::Bundle,
     fact::{FactLookup, FactStatus},
     ids::FactId,
-    page_tree::{Action, FactRef, Page, PageTree, Section, ServiceItem, Target, Text},
+    page_tree::{Action, FactRef, Page, Section, ServiceItem, Target, Text, ValidatedTree},
 };
 
-/// The builder's version, recorded on the candidate (`baseline@1`).
-pub const BUILDER: &str = "baseline@1";
+/// The builder's version, recorded on the candidate (`baseline@2`).
+pub const BUILDER: &str = "baseline@2";
+
+/// Every page's fixed first bytes (I2-1): the meta CSP is part of the emitted
+/// document, so the check can require this exact prologue rather than trust a
+/// policy a hostile bundle rewrote. The stylesheet is a bundle file — inline
+/// `<style>` is unhashable attacker surface, so `style-src 'self'` suffices.
+pub const PROLOGUE: &str = "<!doctype html><html lang=\"en\"><head><meta charset=\"utf-8\">\
+    <meta http-equiv=\"Content-Security-Policy\" content=\"default-src 'none'; img-src 'self'; style-src 'self'; base-uri 'none'; form-action 'self'\">\
+    <meta name=\"viewport\" content=\"width=device-width,initial-scale=1\">";
+
+/// The stylesheet's serve path — the only CSS file the builder emits.
+pub const STYLE_PATH: &str = "style.css";
+
+/// The pilot stylesheet: fixed bytes, no external reference, system fonts — the
+/// page must be complete within the bundle's own bytes. Emitted once at
+/// [`STYLE_PATH`]; the check requires every `.css` file to equal it exactly.
+pub const STYLE: &str = "body{font-family:system-ui,sans-serif;margin:0;color:#111}\
+section,footer{max-width:64rem;margin:0 auto;padding:1rem}\
+.hero{background:#f4f4f4;padding:3rem 1rem;text-align:center}\
+.cta{display:inline-block;background:#111;color:#fff;padding:.75rem 1.5rem;text-decoration:none;min-height:24px}\
+ul.services,ul.trust{list-style:none;padding:0}\
+.quote-form{display:flex;flex-direction:column;gap:.75rem;max-width:32rem}\
+.quote-form label{display:flex;flex-direction:column;gap:.25rem}\
+.quote-form .consent{flex-direction:row;align-items:center}\
+input,select,textarea,button{min-height:24px;font:inherit}\
+blockquote{border-left:3px solid #ccc;margin:1rem 0;padding-left:1rem}";
 
 /// Why a tree cannot become a bundle. Stable codes — an unapproved or absent
 /// fact is a refusal, never a substituted sentence.
@@ -51,12 +76,14 @@ pub enum BuildError {
     Bundle(#[from] crate::bundle::BundleError),
 }
 
-/// Builds `tree` into a bundle with `facts` resolved on `today`. The caller is
-/// expected to have run [`crate::page_tree::validate`] first; the builder still
-/// refuses a fact it cannot use — it is the last enforcement point before bytes.
-pub fn build(tree: &PageTree, facts: &FactLookup, today: Date) -> Result<Bundle, BuildError> {
+/// Builds a [`ValidatedTree`] into a bundle with `facts` resolved on `today`.
+/// Validation is a type, not a convention — a tree that skipped it cannot
+/// reach this function. The builder still refuses a fact it cannot use — it is
+/// the last enforcement point before bytes.
+pub fn build(tree: &ValidatedTree, facts: &FactLookup, today: Date) -> Result<Bundle, BuildError> {
     let mut bundle = Bundle::new();
-    let mut pages: Vec<(&String, &Page)> = tree.pages.iter().map(|p| (&p.path, p)).collect();
+    bundle.put(STYLE_PATH, STYLE.as_bytes().to_vec())?;
+    let mut pages: Vec<(&String, &Page)> = tree.tree().pages.iter().map(|p| (&p.path, p)).collect();
     pages.sort_by(|a, b| a.0.cmp(b.0));
     for (path, page) in pages {
         let file = if path == "/" {
@@ -372,26 +399,12 @@ fn section_id(section: &Section) -> Option<&str> {
     }
 }
 
-/// The pilot stylesheet: fixed bytes, no external reference, system fonts — the
-/// page must be complete within the bundle's own bytes.
-const STYLE: &str = "body{font-family:system-ui,sans-serif;margin:0;color:#111}\
-section,footer{max-width:64rem;margin:0 auto;padding:1rem}\
-.hero{background:#f4f4f4;padding:3rem 1rem;text-align:center}\
-.cta{display:inline-block;background:#111;color:#fff;padding:.75rem 1.5rem;text-decoration:none;min-height:24px}\
-ul.services,ul.trust{list-style:none;padding:0}\
-.quote-form{display:flex;flex-direction:column;gap:.75rem;max-width:32rem}\
-.quote-form label{display:flex;flex-direction:column;gap:.25rem}\
-.quote-form .consent{flex-direction:row;align-items:center}\
-input,select,textarea,button{min-height:24px;font:inherit}\
-blockquote{border-left:3px solid #ccc;margin:1rem 0;padding-left:1rem}";
-
 fn render_page(page: &Page, facts: &FactLookup, today: Date) -> Result<String, BuildError> {
-    let mut out = String::from("<!doctype html><html lang=\"en\"><head><meta charset=\"utf-8\">");
+    let mut out = String::from(PROLOGUE);
     let _ = write!(
         out,
-        "<meta name=\"viewport\" content=\"width=device-width,initial-scale=1\">\
-         <title>{}</title><meta name=\"description\" content=\"{}\">\
-         <style>{STYLE}</style></head><body>",
+        "<title>{}</title><meta name=\"description\" content=\"{}\">\
+         <link rel=\"stylesheet\" href=\"/{STYLE_PATH}\"></head><body>",
         esc(text_of(&page.title)),
         esc(text_of(&page.description))
     );
@@ -406,13 +419,48 @@ fn render_page(page: &Page, facts: &FactLookup, today: Date) -> Result<String, B
 mod tests {
     use super::*;
     use crate::{
+        brief::Brief,
         fact::{FactKind, FactRecord},
-        page_tree::{BoundText, COMPONENT_SET},
+        page_tree::{BoundText, COMPONENT_SET, PageTree, SpecContext},
     };
     use time::Month;
 
     fn day() -> Date {
         Date::from_calendar_date(2026, Month::November, 25).unwrap()
+    }
+
+    fn brief(claims: &[FactId]) -> Brief {
+        let claims: Vec<String> = claims.iter().map(|f| f.as_uuid().to_string()).collect();
+        serde_json::from_value::<crate::brief::BriefForm>(serde_json::json!({
+            "business_name": "Quickbeam Heating",
+            "goal": "quote_requests",
+            "intent": "More enquiries",
+            "audience": "Home owners",
+            "services": [{ "name": "Boiler service" }],
+            "domains": ["quickbeam.example"],
+            "references": [],
+            "claims": claims
+        }))
+        .unwrap()
+        .validate()
+        .unwrap()
+    }
+
+    /// The only door to [`build`]: `validate` must mint the tree clean.
+    fn vtree_with(tree: PageTree, facts: &FactLookup, brief: &Brief) -> ValidatedTree {
+        ValidatedTree::validate(
+            tree,
+            SpecContext {
+                brief,
+                facts,
+                today: day(),
+            },
+        )
+        .unwrap_or_else(|problems| panic!("fixture should validate: {problems:?}"))
+    }
+
+    fn vtree(tree: PageTree, facts: &FactLookup) -> ValidatedTree {
+        vtree_with(tree, facts, &brief(&[]))
     }
 
     fn fact(id: FactId, kind: FactKind, statement: &str) -> FactRecord {
@@ -445,7 +493,7 @@ mod tests {
                           "subheading": "Plumbing and heating in Edinburgh",
                           "action": { "label": "Get a quote", "target": { "anchor": "quote" } } },
                         { "component": "quote_form", "id": "quote",
-                          "services": ["Boiler service"], "consent_notice": "privacy v1",
+                          "services": ["Boiler service"], "consent_notice": "privacy-v1",
                           "submit_label": "Send" }
                     ]
                 },
@@ -467,10 +515,43 @@ mod tests {
     #[test]
     fn the_same_input_builds_byte_identical_bundles() {
         let facts = lookup(vec![]);
-        let a = build(&tree(), &facts, day()).unwrap();
-        let b = build(&tree(), &facts, day()).unwrap();
+        let a = build(&vtree(tree(), &facts), &facts, day()).unwrap();
+        let b = build(&vtree(tree(), &facts), &facts, day()).unwrap();
         assert_eq!(a.encode(), b.encode());
         assert_eq!(a.hash(), b.hash());
+        // Every page carries the fixed prologue — the check's byte-for-byte bar.
+        for file in a.files().values() {
+            assert!(
+                file.starts_with(PROLOGUE.as_bytes()) || file == STYLE.as_bytes(),
+                "a bundle file is a prologue page or the stylesheet"
+            );
+        }
+    }
+
+    #[test]
+    fn a_javascript_target_is_unbuildable() {
+        let mut t = tree();
+        let Section::Hero { action, .. } = &mut t.pages[0].sections[0] else {
+            panic!("hero");
+        };
+        *action = Some(Action {
+            label: "x".into(),
+            target: Target::Url("javascript:alert(1)".into()),
+        });
+        let facts = lookup(vec![]);
+        let brief = brief(&[]);
+        assert!(
+            ValidatedTree::validate(
+                t,
+                SpecContext {
+                    brief: &brief,
+                    facts: &facts,
+                    today: day()
+                }
+            )
+            .is_err(),
+            "a javascript: target must fail validation — the builder never sees it"
+        );
     }
 
     #[test]
@@ -490,7 +571,8 @@ mod tests {
             FactKind::Testimonial,
             "Fixed it <fast> & well",
         )]);
-        let bundle = build(&t, &facts, day()).unwrap();
+        let brief = brief(&[id]);
+        let bundle = build(&vtree_with(t, &facts, &brief), &facts, day()).unwrap();
         let html = String::from_utf8(bundle.files()["index.html"].clone()).unwrap();
         assert!(html.contains("<blockquote>Fixed it &lt;fast&gt; &amp; well</blockquote>"));
         assert!(
@@ -500,7 +582,7 @@ mod tests {
     }
 
     #[test]
-    fn unapproved_or_absent_facts_are_refused_by_name() {
+    fn unapproved_or_absent_facts_are_refused() {
         let id = FactId::from_uuid(uuid::Uuid::from_u128(7));
         let mut t = tree();
         t.pages[0].sections.push(Section::Hours {
@@ -508,17 +590,36 @@ mod tests {
             heading: None,
             fact: FactRef { fact: id },
         });
-        // Absent entirely.
-        assert_eq!(
-            build(&t, &lookup(vec![]), day()),
-            Err(BuildError::UnknownFact(id))
+        let brief = brief(&[]);
+        // Absent entirely — validation refuses the tree, so the build door
+        // is never reached. The builder's `BuildError` remains as the second
+        // line of defense for any caller that outlives its validation.
+        let empty = lookup(vec![]);
+        assert!(
+            ValidatedTree::validate(
+                t.clone(),
+                SpecContext {
+                    brief: &brief,
+                    facts: &empty,
+                    today: day()
+                }
+            )
+            .is_err()
         );
         // Proposed, never approved.
         let mut proposed = fact(id, FactKind::OpeningHours, "Mon–Fri");
         proposed.approval = None;
-        assert_eq!(
-            build(&t, &lookup(vec![proposed]), day()),
-            Err(BuildError::FactNotUsable(id))
+        let proposed = lookup(vec![proposed]);
+        assert!(
+            ValidatedTree::validate(
+                t,
+                SpecContext {
+                    brief: &brief,
+                    facts: &proposed,
+                    today: day()
+                }
+            )
+            .is_err()
         );
     }
 
@@ -526,12 +627,12 @@ mod tests {
     fn tree_text_cannot_inject_markup() {
         let mut t = tree();
         t.pages[0].title = Text::Bound(BoundText {
-            text: "</title><script>alert(1)</script>".into(),
+            text: "O'Malley & Sons \"Plumbing\"".into(),
             facts: vec![],
         });
-        let bundle = build(&t, &lookup(vec![]), day()).unwrap();
+        let facts = lookup(vec![]);
+        let bundle = build(&vtree(t, &facts), &facts, day()).unwrap();
         let html = String::from_utf8(bundle.files()["index.html"].clone()).unwrap();
-        assert!(!html.contains("<script>"));
-        assert!(html.contains("&lt;/title&gt;"));
+        assert!(html.contains("O&#x27;Malley &amp; Sons &quot;Plumbing&quot;"));
     }
 }
