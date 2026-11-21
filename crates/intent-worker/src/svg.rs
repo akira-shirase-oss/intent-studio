@@ -346,7 +346,9 @@ fn fragment_id(inner: &str) -> Option<&str> {
     };
     // The emitter and the expansion counter share `is_fragment` — a reference that renders
     // but is never counted is a bomb the budget cannot see (N14).
-    is_fragment(unquoted).then_some(&unquoted[1..])
+    // `then`, not `then_some`: the slice must be lazy — `url()`, `url('')` or a
+    // non-ASCII char would panic the worker evaluating `[1..]` first (NEW-3).
+    is_fragment(unquoted).then(|| &unquoted[1..])
 }
 
 /// The only form `mask`/`clip-path` may carry: exactly `url(#id)` — canonical lowercase
@@ -490,8 +492,25 @@ fn is_fragment(value: &str) -> bool {
     })
 }
 
-/// Refusals are reported up to this many, then only counted.
-const MAX_DROPPED_REPORTED: usize = 64;
+/// Refusals are reported up to this many, then only counted. Count × entry cap must
+/// keep the worker's JSON header under the protocol's 1024-byte line (NEW-4).
+const MAX_DROPPED_REPORTED: usize = 24;
+/// A reported name is truncated to this many bytes — XML names have no length bound.
+const MAX_DROPPED_ENTRY_BYTES: usize = 24;
+
+/// `s` cut at `max` bytes or at the last whole char inside it — a name can be
+/// multi-byte, and a mid-char cut would be the `url()` panic all over again.
+fn truncate_bytes(s: String, max: usize) -> String {
+    if s.len() <= max {
+        return s;
+    }
+    let cut = s
+        .char_indices()
+        .take_while(|(i, c)| i + c.len_utf8() <= max)
+        .last()
+        .map_or(0, |(i, c)| i + c.len_utf8());
+    s[..cut].to_string()
+}
 
 struct Writer {
     out: String,
@@ -507,7 +526,8 @@ impl Writer {
     fn dropped(&mut self, what: String) {
         self.removed += 1;
         if self.dropped.len() < MAX_DROPPED_REPORTED {
-            self.dropped.push(what);
+            self.dropped
+                .push(truncate_bytes(what, MAX_DROPPED_ENTRY_BYTES));
         }
     }
 
