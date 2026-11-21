@@ -189,6 +189,10 @@ pub struct Config {
     pub session_idle: Duration,
     /// Mark the session cookie `Secure`.
     pub cookie_secure: bool,
+    /// Mount `POST /__test/clock` so drills can advance `now_ms` without wall-clock
+    /// waits (K). `INTENT_TEST_CLOCK`; default off — no request may move the clock
+    /// in production.
+    pub test_clock: bool,
     /// The built workspace app, served at `/workspace`.
     pub workspace_dir: Option<PathBuf>,
     /// `INTENT_STATE_DIR`: crash-durable runtime state — the sign-out retry journal —
@@ -614,6 +618,10 @@ impl Config {
                 .push("INTENT_SESSION_IDLE_SECS: must be at least 120 outside development".into());
         }
         let cookie_secure = env.parse("INTENT_COOKIE_SECURE", true);
+        // `INTENT_TEST_CLOCK` mounts `POST /__test/clock`, the drills' way to age the
+        // process clock without a wall-clock wait (K). Off everywhere else: nothing a
+        // request can reach may move `now_ms` in production.
+        let test_clock = env.parse("INTENT_TEST_CLOCK", false);
         // An insecure operator cookie in production would ride every plaintext hop.
         if !cookie_secure && profile != Profile::Development {
             env.problems.push(
@@ -698,6 +706,7 @@ impl Config {
                 session_ttl,
                 session_idle,
                 cookie_secure,
+                test_clock,
                 workspace_dir,
                 state_dir,
                 studio,

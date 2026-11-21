@@ -80,6 +80,9 @@ pub struct Inner {
     /// The content store, the asset worker and the egress guard (I1).
     pub studio: Studio,
     started: Instant,
+    /// Drill-injected clock offset on `now_ms` (K): zero unless `INTENT_TEST_CLOCK`
+    /// mounted `POST /__test/clock`.
+    clock_skew_ms: std::sync::atomic::AtomicU64,
 }
 
 /// What the studio's untrusted-input routes need. Built at startup by [`crate::serve`].
@@ -127,6 +130,7 @@ impl App {
             metrics: Metrics::default(),
             studio,
             started: Instant::now(),
+            clock_skew_ms: std::sync::atomic::AtomicU64::new(0),
             config,
             db,
             sessions,
@@ -136,9 +140,14 @@ impl App {
         })))
     }
 
-    /// Milliseconds on the process's monotonic clock (for token buckets).
+    /// Milliseconds on the process's monotonic clock (for token buckets), plus any
+    /// drill-injected offset (K).
     pub fn now_ms(&self) -> u64 {
-        u64::try_from(self.started.elapsed().as_millis()).unwrap_or(u64::MAX)
+        let elapsed = u64::try_from(self.started.elapsed().as_millis()).unwrap_or(u64::MAX);
+        elapsed.saturating_add(
+            self.clock_skew_ms
+                .load(std::sync::atomic::Ordering::Relaxed),
+        )
     }
 }
 
@@ -193,6 +202,25 @@ fn panic_response(_payload: Box<dyn std::any::Any + Send + 'static>) -> Response
 
 async fn healthz() -> Json<serde_json::Value> {
     Json(json!({ "status": "ok" }))
+}
+
+/// The most one `POST /__test/clock` call may move `now_ms` (K).
+const MAX_CLOCK_ADVANCE_MS: u64 = 40 * 24 * 3_600_000;
+
+#[derive(serde::Deserialize)]
+struct ClockAdvance {
+    advance_ms: u64,
+}
+
+/// `POST /__test/clock`: a drill advances the process clock instead of sleeping on
+/// wall time (K). Mounted only under `INTENT_TEST_CLOCK`; unbounded moves are refused.
+async fn advance_clock(State(app): State<App>, Json(body): Json<ClockAdvance>) -> StatusCode {
+    if body.advance_ms == 0 || body.advance_ms > MAX_CLOCK_ADVANCE_MS {
+        return StatusCode::UNPROCESSABLE_ENTITY;
+    }
+    app.clock_skew_ms
+        .fetch_add(body.advance_ms, std::sync::atomic::Ordering::Relaxed);
+    StatusCode::NO_CONTENT
 }
 
 async fn readyz(State(app): State<App>) -> Response {
@@ -407,6 +435,9 @@ pub fn router(app: App) -> Router {
                 .delete(operator::sign_out),
         )
         .route("/v1/operator/leads", get(operator::inbox));
+    if app.config.test_clock {
+        spine = spine.route("/__test/clock", post(advance_clock));
+    }
     if let Some(dir) = workspace {
         let index = dir.join("200.html");
         // Files are served as they are; every other path (a route like `/workspace/briefs`,

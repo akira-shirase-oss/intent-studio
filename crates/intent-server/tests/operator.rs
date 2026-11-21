@@ -268,9 +268,26 @@ async fn a_flood_of_bad_session_cookies_is_limited_and_leaves_intake_alone() {
     env.retain(|(k, _)| k != "INTENT_COOKIE_SECURE");
     env.push(("INTENT_OPERATOR_PASSWORD_HASH".into(), hash()));
     env.push(("INTENT_TRUSTED_PROXIES".into(), "127.0.0.1".into()));
+    env.push(("INTENT_TEST_CLOCK".into(), "true".into()));
     let server = Server::start(env).await;
     let client = client();
     let session = format!("{}/v1/operator/session", server.base);
+
+    // Without INTENT_TEST_CLOCK there is no route at all — a request can never move
+    // the clock in production.
+    let unclocked = Server::start(drill_env(&db, &fixture.url)).await;
+    let refused = client
+        .post(format!("{}/__test/clock", unclocked.base))
+        .json(&serde_json::json!({ "advance_ms": 1 }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(
+        refused.status(),
+        404,
+        "the test clock answered without its env"
+    );
+    drop(unclocked);
 
     let mut statuses = std::collections::HashMap::<u16, usize>::new();
     for n in 0..40_u32 {
@@ -312,7 +329,19 @@ async fn a_flood_of_bad_session_cookies_is_limited_and_leaves_intake_alone() {
     };
     // Inside the trust window the digest answers without even a charge.
     assert_eq!(valid().send().await.unwrap().status(), 200);
-    tokio::time::sleep(std::time::Duration::from_secs(75)).await;
+    // The flood's bucket refills over its window; advancing the injected clock ages it
+    // (and the verified-digest trust) without a wall-clock wait (K).
+    let advance = client
+        .post(format!("{}/__test/clock", server.base))
+        .json(&serde_json::json!({ "advance_ms": 75_000 }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(advance.status(), 204, "the test clock refused the advance");
+    // A no-op advance leaves the bucket empty and every re-flood request is another 429:
+    // the assertions must see both charged answers and fresh refusals to prove the
+    // bucket actually refilled and re-drained.
+    let mut charged = 0_u32;
     let mut drained = 0_u32;
     for n in 0..25_u32 {
         let status = client
@@ -323,10 +352,10 @@ async fn a_flood_of_bad_session_cookies_is_limited_and_leaves_intake_alone() {
             .await
             .unwrap()
             .status();
-        if status == 429 {
-            drained += 1;
-        }
+        charged += u32::from(status == 401);
+        drained += u32::from(status == 429);
     }
+    assert!(charged > 0, "the advance never refilled the bucket");
     assert!(drained > 0, "the re-flood never re-drained the bucket");
     // Past the TTL, against a re-drained bucket: the known digest re-checks uncharged.
     assert_eq!(
