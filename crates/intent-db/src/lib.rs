@@ -15,6 +15,7 @@
 //! of any message this crate formats, and [`DbError::summary`] gives a log-safe line.
 
 mod assets;
+mod candidates;
 mod inbox;
 mod leads;
 mod outbox;
@@ -31,6 +32,7 @@ use sqlx::{
 };
 
 pub use assets::{AssetRow, NewAsset, NewSnapshot, SnapshotRow};
+pub use candidates::{CandidateRow, CheckRecordRow, NewCandidate, NewCheckRecord};
 pub use inbox::{AuditEntry, InboxLead, InboxQuery};
 pub use leads::{NewLead, StoreOutcome};
 pub use outbox::{AttemptRecord, ClaimedNotification, RecordResult};
