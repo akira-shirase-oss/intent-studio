@@ -169,6 +169,84 @@ fn signout_db(config: &Config) -> anyhow::Result<Db> {
     .map_err(|e| anyhow::anyhow!("INTENT_DATABASE_URL: {}", e.summary()))
 }
 
+/// The in-memory session state the last boot or the audit table still knows: the
+/// journaled sign-out debts (re-tombstoned and their deletes resumed) and the
+/// addresses the known window still covers. Runs before `mark_ready` so the first
+/// request sees the restored state (N7 residual, NEW-1, N10).
+async fn restore_session_memory(config: &Config, app: &App) {
+    // Sign-out deletes the last boot never confirmed are journaled: tombstone them
+    // again and resume their retries — the rows may still be live, and an
+    // unconfirmed delete must never re-warm.
+    {
+        let mut retries = app
+            .retries
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if retries.pending_len() > 0 {
+            let until = app
+                .now_ms()
+                .saturating_add(u64::try_from(config.session_ttl.as_millis()).unwrap_or(u64::MAX));
+            for digest in retries.pending_digests() {
+                app.session_gate.forget(&digest, app.now_ms(), until);
+            }
+            let count = retries.pending_len();
+            retries.resume_all(&app.retries, app);
+            tracing::info!(count, "resumed journaled sign-out retries");
+        }
+    }
+    // Addresses that produced a session inside the known window keep their day
+    // budget through a deploy — an empty set after every restart is the D-052
+    // lockout again.
+    match app
+        .sessions
+        .recent_signer_addresses(Duration::from_millis(
+            crate::operator::KNOWN_ADDRESS_WINDOW_MS,
+        ))
+        .await
+    {
+        Ok(addresses) => {
+            let count = addresses.len();
+            let now = app.now_ms();
+            for address in addresses
+                .iter()
+                .filter_map(|a| a.parse::<std::net::IpAddr>().ok())
+            {
+                app.sign_in
+                    .mark_address(intent_domain::ratelimit::AddressKey::of(address), now);
+            }
+            tracing::info!(count, "seeded known sign-in addresses");
+        }
+        Err(error) => {
+            tracing::warn!(%error, "known sign-in addresses not seeded — the day budget applies");
+        }
+    }
+}
+
+/// Sign-out retries still owed a delete get a deadline to land, then the journal
+/// hands the rest to the next boot — say how many it is carrying (NEW-1).
+async fn drain_sign_out_retries(app: &App) {
+    let retry_tasks = app
+        .retries
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .take_tasks();
+    if tokio::time::timeout(Duration::from_secs(3), retry_tasks.join_all())
+        .await
+        .is_err()
+        && let pending = app
+            .retries
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .pending_len()
+        && pending > 0
+    {
+        tracing::warn!(
+            pending,
+            "sign-out retries unfinished at shutdown — journaled for next boot"
+        );
+    }
+}
+
 /// Runs the server until a signal, then drains.
 pub async fn run(config: Config) -> anyhow::Result<ShutdownOutcome> {
     let signal = os_signal().context("installing signal handlers")?;
@@ -226,7 +304,8 @@ pub async fn run(config: Config) -> anyhow::Result<ShutdownOutcome> {
     );
 
     let app_connections = app.connections.clone();
-    let router = app::router(app);
+    let router = app::router(app.clone());
+    restore_session_memory(&config, &app).await;
     let address = listener.local_addr().context("reading the bound address")?;
     tracing::info!(%address, "listening");
     health.mark_ready();
@@ -262,6 +341,7 @@ pub async fn run(config: Config) -> anyhow::Result<ShutdownOutcome> {
     if tokio::time::timeout(tail, tasks.wait()).await.is_err() {
         tracing::warn!("background tasks did not stop in time");
     }
+    drain_sign_out_retries(&app).await;
     let _ = tokio::time::timeout(Duration::from_secs(5), async {
         db.close().await;
         notifier_db.close().await;

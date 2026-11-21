@@ -415,6 +415,13 @@ async fn a_sign_out_the_database_cannot_confirm_stays_revoked_until_the_retry_la
     env.retain(|(k, _)| k != "INTENT_COOKIE_SECURE");
     env.push(("INTENT_OPERATOR_PASSWORD_HASH".into(), hash()));
     env.push(("INTENT_TRUSTED_PROXIES".into(), "127.0.0.1".into()));
+    // The retry journal lives next to the store: this drill proves it writes once.
+    let store_dir = std::env::temp_dir().join(format!(
+        "intent-drill-store-{}",
+        uuid::Uuid::now_v7().simple()
+    ));
+    std::fs::create_dir_all(&store_dir).unwrap();
+    env.push(("INTENT_STORE_DIR".into(), store_dir.display().to_string()));
     let server = Server::start(env).await;
     let client = client();
     let cookie = sign_in(&client, &server.base, PASSWORD, "10.81.0.1", "req-lock").await;
@@ -432,11 +439,13 @@ async fn a_sign_out_the_database_cannot_confirm_stays_revoked_until_the_retry_la
     let session = format!("{}/v1/operator/session", server.base);
     let valid = || client.get(&session).header("cookie", &cookie);
 
-    // Hold the session table hostage: the delete must fail, the answer must be honest, and
+    // Hold the session row hostage: the delete must fail, the answer must be honest, and
     // the tombstone must refuse the still-live row for longer than any old cache window.
+    // A row lock, not ACCESS EXCLUSIVE: a table lock blocks the plain SELECTs below too
+    // and the drill deadlocks on its own assertion (NEW-2).
     let mut lock = db.connect().await;
     sqlx::query("BEGIN").execute(&mut lock).await.unwrap();
-    sqlx::query("LOCK TABLE operator_sessions IN ACCESS EXCLUSIVE MODE")
+    sqlx::query("SELECT token_digest FROM operator_sessions FOR UPDATE")
         .execute(&mut lock)
         .await
         .unwrap();
@@ -465,12 +474,35 @@ async fn a_sign_out_the_database_cannot_confirm_stays_revoked_until_the_retry_la
         401,
         "a still-live row answered after the failed sign-out"
     );
+    // A second sign-out of the same digest is answered from the retry's memory —
+    // no second task, no second slot in the journal, no queue on the one
+    // connection (NEW-1). The journal file is the proof: exactly one 32-byte record.
+    let again = client
+        .delete(&session)
+        .header("cookie", &cookie)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(
+        again.status(),
+        503,
+        "a pending retry's repeat was not answered from memory"
+    );
+    let journal = store_dir.join("signout-pending.journal");
+    assert_eq!(
+        std::fs::metadata(&journal)
+            .expect("no retry journal beside the store")
+            .len(),
+        32,
+        "the journal must hold exactly one digest record"
+    );
 
-    // Free the table: the tracked retry must finish the delete without another request.
+    // Free the row: the tracked retry must finish the delete without another request.
     sqlx::query("ROLLBACK").execute(&mut lock).await.unwrap();
     drop(lock);
     let mut gone = false;
-    for _ in 0..40 {
+    // The retry's first re-attempt sits behind its 30 s backoff — poll past it.
+    for _ in 0..160 {
         let live: i64 = sqlx::query_scalar("SELECT count(*) FROM operator_sessions")
             .fetch_one(&mut rows)
             .await
@@ -482,6 +514,98 @@ async fn a_sign_out_the_database_cannot_confirm_stays_revoked_until_the_retry_la
         tokio::time::sleep(Duration::from_millis(250)).await;
     }
     assert!(gone, "the background retry never deleted the row");
+    assert_eq!(valid().send().await.unwrap().status(), 401);
+    db.drop_database().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "needs the stack: scripts/stack.sh up (run by scripts/drills.sh)"]
+async fn a_restart_resumes_the_sign_out_retry_from_its_journal() {
+    // A restart must not drop the debt: the journaled digest is re-tombstoned and its
+    // delete retried by the new process, so the still-live row stays refused (N7).
+    let db = TestDb::create(1).await;
+    let fixture = ProviderFixture::start(Mode::Ok).await;
+    let mut env = drill_env(&db, &fixture.url);
+    env.retain(|(k, _)| k != "INTENT_COOKIE_SECURE");
+    env.push(("INTENT_OPERATOR_PASSWORD_HASH".into(), hash()));
+    env.push(("INTENT_TRUSTED_PROXIES".into(), "127.0.0.1".into()));
+    let store_dir = std::env::temp_dir().join(format!(
+        "intent-drill-store-{}",
+        uuid::Uuid::now_v7().simple()
+    ));
+    std::fs::create_dir_all(&store_dir).unwrap();
+    env.push(("INTENT_STORE_DIR".into(), store_dir.display().to_string()));
+    let mut server = Server::start(env).await;
+    let client = client();
+    let cookie = sign_in(&client, &server.base, PASSWORD, "10.82.0.1", "req-restart").await;
+    assert_eq!(cookie.status(), 200);
+    let cookie = cookie
+        .headers()
+        .get("set-cookie")
+        .unwrap()
+        .to_str()
+        .unwrap()
+        .split(';')
+        .next()
+        .unwrap()
+        .to_owned();
+    let session = format!("{}/v1/operator/session", server.base);
+    let valid = || client.get(&session).header("cookie", &cookie);
+
+    // Hold the row hostage so the delete cannot confirm, then kill the server the
+    // hard way: no drain, no cleanup — the journal is the only record of the debt.
+    let mut lock = db.connect().await;
+    sqlx::query("BEGIN").execute(&mut lock).await.unwrap();
+    sqlx::query("SELECT token_digest FROM operator_sessions FOR UPDATE")
+        .execute(&mut lock)
+        .await
+        .unwrap();
+    let out = client
+        .delete(&session)
+        .header("cookie", &cookie)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(out.status(), 503);
+    assert_eq!(
+        std::fs::metadata(store_dir.join("signout-pending.journal"))
+            .expect("the debt was never journaled")
+            .len(),
+        32
+    );
+    server.kill();
+    server.restart().await;
+
+    // The new process re-tombstoned the digest from the journal before it went
+    // ready: the row is still live (the lock still holds) yet the replay refuses.
+    assert_eq!(
+        valid().send().await.unwrap().status(),
+        401,
+        "the journaled digest was not re-tombstoned at boot — a live row answered"
+    );
+    let mut rows = db.connect().await;
+    let live: i64 = sqlx::query_scalar("SELECT count(*) FROM operator_sessions")
+        .fetch_one(&mut rows)
+        .await
+        .unwrap();
+    assert_eq!(live, 1, "the row died while the lock still held it");
+
+    // Free the row: the new process's resumed retry finishes the delete.
+    sqlx::query("ROLLBACK").execute(&mut lock).await.unwrap();
+    drop(lock);
+    let mut gone = false;
+    for _ in 0..160 {
+        let live: i64 = sqlx::query_scalar("SELECT count(*) FROM operator_sessions")
+            .fetch_one(&mut rows)
+            .await
+            .unwrap();
+        if live == 0 {
+            gone = true;
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(250)).await;
+    }
+    assert!(gone, "the resumed retry never deleted the row");
     assert_eq!(valid().send().await.unwrap().status(), 401);
     db.drop_database().await;
 }

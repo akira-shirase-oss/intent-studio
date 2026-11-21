@@ -54,8 +54,9 @@ pub struct Inner {
     /// reach it, so no unauthenticated path — cookie flood or sign-in flood — can queue a
     /// delete behind a 5xx.
     pub signout_db: Db,
-    /// Sign-out deletes that a refused attempt could not confirm, retried until confirmed.
-    pub retries: std::sync::Mutex<tokio::task::JoinSet<()>>,
+    /// Sign-out deletes a refused attempt could not confirm: one tracked task per
+    /// digest, journaled so a restart re-tombstones and resumes them (NEW-1).
+    pub retries: Arc<std::sync::Mutex<crate::operator::Retries>>,
     /// Liveness and readiness.
     pub health: Health,
     /// Counters.
@@ -109,6 +110,14 @@ impl App {
         health: Health,
         studio: Studio,
     ) -> Self {
+        // The journal sits next to the store's bytes: pending sign-out deletes survive
+        // a restart through it (NEW-1). Without a store the journal is skipped — the
+        // retry set still works in memory.
+        let journal = config
+            .studio
+            .store_dir
+            .as_ref()
+            .map(|dir| dir.join("signout-pending.journal"));
         Self(Arc::new(Inner {
             gate: Arc::new(Semaphore::new(config.max_in_flight)),
             address_limiter: Limiter::new(config.address_quota, config.rate_table_entries),
@@ -125,7 +134,9 @@ impl App {
             db,
             sessions,
             signout_db,
-            retries: std::sync::Mutex::new(tokio::task::JoinSet::new()),
+            retries: Arc::new(std::sync::Mutex::new(crate::operator::Retries::open(
+                journal,
+            ))),
             health,
         }))
     }

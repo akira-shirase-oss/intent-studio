@@ -5,7 +5,7 @@
 //! bytes in an `HttpOnly`, `SameSite=Strict` cookie; only its SHA-256 digest is stored, and the
 //! token is never logged. Every inbox read is cross-tenant, so it writes an audit row.
 
-use std::time::Duration;
+use std::{collections::HashSet, path::PathBuf, sync::Arc, time::Duration};
 
 use argon2::{Argon2, PasswordHash, PasswordVerifier as _};
 use axum::{
@@ -54,7 +54,7 @@ fn cookie_name(app: &App) -> &'static str {
 }
 
 /// How long a successful sign-in makes its address "known" (D-052).
-const KNOWN_ADDRESS_WINDOW_MS: u64 = 30 * 24 * 3_600_000;
+pub(crate) const KNOWN_ADDRESS_WINDOW_MS: u64 = 30 * 24 * 3_600_000;
 
 /// Operator sign-in admission, with time passed in so its rules are tested exactly (N3).
 ///
@@ -391,6 +391,17 @@ pub async fn sign_in(
     // Read only after the rate limit (see `intake::read_body`).
     body: axum::body::Body,
 ) -> Result<Response, ApiError> {
+    // JSON only: a cross-site form cannot send it without a preflight. Checked before
+    // anything — sign-in configuration, the per-address charge — so a request that
+    // cannot be a sign-in attempt churns neither the bounded table nor the disabled
+    // check, and a non-JSON body is refused the same way configured or not.
+    let is_json = headers
+        .get(header::CONTENT_TYPE)
+        .and_then(|v| v.to_str().ok())
+        .is_some_and(|v| v.starts_with("application/json"));
+    if !is_json && !crate::mutated!(app.config, crate::config::Mutation::NoContentType) {
+        return Err(ApiError::UnsupportedMediaType);
+    }
     let Some(hash) = app.config.operator_password_hash.clone() else {
         return Err(ApiError::SignInDisabled);
     };
@@ -401,16 +412,6 @@ pub async fn sign_in(
         &app.config.trusted_proxies,
         crate::mutated!(app.config, crate::config::Mutation::TrustAnyForwarded),
     );
-    // JSON only: a cross-site form cannot send it without a preflight. Checked before the
-    // per-address charge so requests that cannot be sign-in attempts cannot churn the
-    // bounded table either.
-    let is_json = headers
-        .get(header::CONTENT_TYPE)
-        .and_then(|v| v.to_str().ok())
-        .is_some_and(|v| v.starts_with("application/json"));
-    if !is_json && !crate::mutated!(app.config, crate::config::Mutation::NoContentType) {
-        return Err(ApiError::UnsupportedMediaType);
-    }
     // Per address first, alone: a request refused here never touches a verification budget.
     if let Err(RetryAfter(secs)) = app.sign_in.admit(AddressKey::of(address), app.now_ms()) {
         return Err(ApiError::RateLimited {
@@ -553,6 +554,22 @@ pub async fn sign_out(
     // Anyone else pays the check's charge first: an unsigned delete is a database write.
     let ours = app.session_gate.is_known(&token_digest, now)
         || app.session_gate.is_revoked(&token_digest, now);
+    // A tracked retry already owns this digest: the honest 503 is answered from memory —
+    // a revoked cookie cannot make each 503 spawn another task or queue another acquire
+    // on the one connection (NEW-1).
+    if ours
+        && app
+            .retries
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .is_pending(&token_digest)
+    {
+        return Ok(answer(
+            StatusCode::SERVICE_UNAVAILABLE,
+            Some(json!({ "signed_out": false })),
+            false,
+        ));
+    }
     // The proof's seam: claim the delete without running it — then evict the memory, so the
     // replay that must refuse it is answered by the database, not by a warm cache (M2).
     let faked = ours && crate::mutated!(app.config, crate::config::Mutation::NoSessionDelete);
@@ -585,8 +602,7 @@ pub async fn sign_out(
     // The tombstone outlives the session itself: until the row could no longer be live the
     // digest must never be re-warmed — a delete that was never confirmed is covered by it
     // while the background retry finishes the job (N7 residual).
-    let until =
-        now.saturating_add(u64::try_from(app.config.session_ttl.as_millis()).unwrap_or(u64::MAX));
+    let until = tombstone_until(now, app.config.session_ttl);
     match (deleted, ours) {
         // Confirmed gone — or, for a digest that was ours, confirmed absent: either way it
         // is dead, to the table and to memory.
@@ -616,20 +632,98 @@ pub async fn sign_out(
     }
 }
 
-/// A delete the pool refused once keeps retrying on the sign-out connection until the row
-/// is confirmed gone or the session's own expiry makes the retry pointless — the tombstone
-/// covers it either way, and the `JoinSet` keeps the task tracked rather than leaked.
-fn retry_delete(app: &App, token_digest: [u8; 32]) {
-    let sessions = app.signout_db.clone();
-    let deadline = std::time::Instant::now() + app.config.session_ttl;
-    app.retries
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner)
-        .spawn(async move {
+/// The tombstone's end: the session's whole TTL from `now`, so an unconfirmed
+/// delete can never be re-warmed while the row could still be live (N7).
+fn tombstone_until(now_ms: u64, session_ttl: Duration) -> u64 {
+    now_ms.saturating_add(u64::try_from(session_ttl.as_millis()).unwrap_or(u64::MAX))
+}
+
+/// How many sign-out deletes may be pending at once — the tombstone LRU's bound:
+/// a digest past the cap stays tombstoned, it just is not retried (NEW-1).
+const MAX_PENDING_RETRIES: usize = 10_000;
+
+/// Sign-out deletes a refused attempt could not confirm, tracked: one task per
+/// digest, every digest journaled so a restart can re-tombstone and resume. The
+/// thief holding a revoked cookie gets each 503 from memory — `pending` — and can
+/// never spawn a second task or queue an acquire on the one connection (NEW-1).
+pub struct Retries {
+    tasks: tokio::task::JoinSet<()>,
+    pending: HashSet<[u8; 32]>,
+    journal: Option<PathBuf>,
+}
+
+impl Retries {
+    /// Loads `journal` — digests a previous boot still owed a delete for. A corrupt
+    /// or short journal yields only the whole records it contains; a file that
+    /// cannot be read yields an empty set and a warning, never a failed boot.
+    pub fn open(journal: Option<PathBuf>) -> Self {
+        let pending = journal.as_deref().map(read_journal).unwrap_or_default();
+        Self {
+            tasks: tokio::task::JoinSet::new(),
+            pending,
+            journal,
+        }
+    }
+
+    /// Whether a delete for this digest is already tracked — the memory answer.
+    pub(crate) fn is_pending(&self, digest: &[u8; 32]) -> bool {
+        self.pending.contains(digest)
+    }
+
+    /// How many digests are pending — the shutdown log line's count.
+    pub(crate) fn pending_len(&self) -> usize {
+        self.pending.len()
+    }
+
+    /// The pending digests — the boot path's re-tombstone list.
+    pub(crate) fn pending_digests(&self) -> Vec<[u8; 32]> {
+        self.pending.iter().copied().collect()
+    }
+
+    /// Queues a refused delete: one entry per digest (re-spawns are answered from
+    /// `pending`), reaped finished handles, journaled before the task exists so a
+    /// crash between them never loses the debt.
+    pub(crate) fn enqueue(
+        &mut self,
+        set: &Arc<std::sync::Mutex<Retries>>,
+        app: &App,
+        digest: [u8; 32],
+    ) {
+        if !self.pending.insert(digest) {
+            return;
+        }
+        if self.pending.len() > MAX_PENDING_RETRIES {
+            self.pending.remove(&digest);
+            tracing::warn!("sign-out retry set full: delete will not be retried");
+            return;
+        }
+        self.sync_journal();
+        while self.tasks.try_join_next().is_some() {}
+        self.spawn_one(set, app, digest);
+    }
+
+    /// Re-spawns a task for every digest the journal loaded — the pending set and
+    /// the file already name the debt; only the tasks are missing after a restart.
+    pub(crate) fn resume_all(&mut self, set: &Arc<std::sync::Mutex<Retries>>, app: &App) {
+        for digest in self.pending.iter().copied().collect::<Vec<_>>() {
+            self.spawn_one(set, app, digest);
+        }
+    }
+
+    /// Takes the handles out for a bounded shutdown drain.
+    pub(crate) fn take_tasks(&mut self) -> tokio::task::JoinSet<()> {
+        std::mem::take(&mut self.tasks)
+    }
+
+    fn spawn_one(&mut self, set: &Arc<std::sync::Mutex<Retries>>, app: &App, digest: [u8; 32]) {
+        let sessions = app.signout_db.clone();
+        let deadline = std::time::Instant::now() + app.config.session_ttl;
+        let set = Arc::clone(set);
+        self.tasks.spawn(async move {
             let mut backoff = Duration::from_millis(250);
             loop {
-                match sessions.delete_session(&token_digest).await {
-                    Ok(_) => return,
+                match sessions.delete_session(&digest).await {
+                    Ok(_) => break,
                     Err(error) if std::time::Instant::now() < deadline => {
                         tracing::warn!(%error, "session delete retry failed");
                         tokio::time::sleep(backoff).await;
@@ -637,11 +731,74 @@ fn retry_delete(app: &App, token_digest: [u8; 32]) {
                     }
                     Err(error) => {
                         tracing::error!(%error, "session delete never confirmed before expiry");
-                        return;
+                        break;
                     }
                 }
             }
+            set.lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .finish(&digest);
         });
+    }
+
+    /// The debt is paid (or the session expired): drop the digest and re-journal.
+    fn finish(&mut self, digest: &[u8; 32]) {
+        if self.pending.remove(digest) {
+            self.sync_journal();
+        }
+    }
+
+    /// The pending set → tmp file → fsync → rename → fsync dir: a crash sees the
+    /// old or the new file, never a half write (NEW-1). Best-effort: a write that
+    /// fails loses only crash persistence, not the in-memory set — so it warns.
+    fn sync_journal(&self) {
+        let Some(path) = &self.journal else {
+            return;
+        };
+        let mut buf = Vec::with_capacity(self.pending.len() * 32);
+        for digest in &self.pending {
+            buf.extend_from_slice(digest);
+        }
+        let tmp = path.with_extension("journal.tmp");
+        let written = (|| -> std::io::Result<()> {
+            std::fs::write(&tmp, &buf)?;
+            std::fs::File::open(&tmp)?.sync_all()?;
+            std::fs::rename(&tmp, path)?;
+            std::fs::File::open(path.parent().unwrap_or(std::path::Path::new(".")))?.sync_all()
+        })();
+        if let Err(error) = written {
+            tracing::warn!(%error, "sign-out retry journal not durable this write");
+        }
+    }
+}
+
+/// Reads `path` back into digest records; trailing bytes that do not make a whole
+/// record are ignored with a warning.
+fn read_journal(path: &std::path::Path) -> HashSet<[u8; 32]> {
+    let bytes = match std::fs::read(path) {
+        Ok(bytes) => bytes,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return HashSet::new(),
+        Err(error) => {
+            tracing::warn!(%error, "sign-out retry journal unreadable — pending deletes lost");
+            return HashSet::new();
+        }
+    };
+    let (records, remainder) = bytes.as_chunks::<32>();
+    let pending: HashSet<[u8; 32]> = records.iter().copied().collect();
+    if !remainder.is_empty() {
+        tracing::warn!("sign-out retry journal had a torn record — ignoring its tail");
+    }
+    pending
+}
+
+/// A delete the pool refused once is queued on the tracked set — one task per
+/// digest, journaled, retried on the sign-out connection until the row is
+/// confirmed gone or the session's own expiry makes it pointless.
+fn retry_delete(app: &App, token_digest: [u8; 32]) {
+    app.retries
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .enqueue(&app.retries, app, token_digest);
 }
 
 #[derive(Deserialize)]
