@@ -10,7 +10,30 @@
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
-pattern='INTENT_MUTATION|mutation-seams|no-session-check|no-session-delete|trust-any-forwarded|no-metrics-token|no-request-bound|no-content-type|no-egress-guard|no-lead-dedup|client-session-token|check-any-hash|allow-inline-svg|INTENT_TEST_CLOCK|__test/clock|advance_ms'
+# One list drives both sides of the check (F6): the scan pattern is built from it,
+# and --prove asserts for EVERY needle that the pattern covers it and the feature
+# binary carries it — a needle missing from either half is a broken proof, not a pass.
+# `mutation-seams` itself is deliberately absent: a cfg feature name is never a
+# binary literal, so no scan could detect it — --prove flags a needle that can
+# never appear, which is how the dead arm was caught.
+needles=(
+    INTENT_MUTATION
+    no-session-check
+    no-session-delete
+    trust-any-forwarded
+    no-metrics-token
+    no-request-bound
+    no-content-type
+    no-egress-guard
+    no-lead-dedup
+    client-session-token
+    check-any-hash
+    allow-inline-svg
+    INTENT_TEST_CLOCK
+    __test/clock
+    advance_ms
+)
+pattern="$(IFS='|'; echo "${needles[*]}")"
 
 # scan <binary>: 0 when the binary exists and carries no seam, 1 otherwise. grep reads
 # the file itself — `strings | grep -q` dies on SIGPIPE under pipefail exactly when it
@@ -55,10 +78,14 @@ if [ "${1:-}" = "--prove" ]; then
         echo "PROOF FAILED: the scan passed a mutated binary" >&2
         exit 1
     fi
-    # The refusal must cover the clock seam specifically (F6): a pass attributable
-    # to any other pattern proves nothing about the clock strings. Each must be
-    # present — and therefore detectable — in the feature binary itself.
-    for needle in INTENT_TEST_CLOCK __test/clock advance_ms check-any-hash allow-inline-svg; do
+    # Every needle, not just the ones that happened to refuse (F6): the pattern must
+    # match the needle itself — a misspelling would scan for a string nothing carries —
+    # and the feature binary must contain it, so the refusal is attributable to each.
+    for needle in "${needles[@]}"; do
+        if ! LC_ALL=C grep -qE -- "$pattern" <<<"$needle"; then
+            echo "PROOF FAILED: '$needle' is not covered by the scan pattern" >&2
+            exit 1
+        fi
         status=0
         LC_ALL=C grep -qaF "$needle" "$built" || status=$?
         if [ "$status" -ne 0 ]; then
@@ -66,7 +93,7 @@ if [ "${1:-}" = "--prove" ]; then
             exit 1
         fi
     done
-    echo "proof ok: the scan refuses a mutated binary (seam strings detected)"
+    echo "proof ok: the scan refuses a mutated binary (all ${#needles[@]} needles covered and detected)"
     exit 0
 fi
 

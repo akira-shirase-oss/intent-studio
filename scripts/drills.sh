@@ -43,6 +43,11 @@ run drills-clock cargo test --release --locked -p intent-server --features mutat
     --no-fail-fast --test operator \
     -- --ignored a_flood_of_bad_session_cookies_is_limited_and_leaves_intake_alone \
     a_restart_seeds_only_in_window_sign_ins_under_the_current_credential
+# F6(a): the feature build's own checks run here — the config gate's negative
+# test and the seam call-site lints are feature-gated, so a default-only pass
+# never saw them.
+run feature-clippy cargo clippy -p intent-server --all-targets --features mutation-seams --locked -- -D warnings
+run feature-lib cargo test --release --locked -p intent-server --features mutation-seams --lib
 # The attacks run against the default build — what ships — first: every guard must
 # refuse when INTENT_MUTATION is not even parsed (the variable is feature-gated).
 run attacks cargo test --release --locked -p intent-server \
