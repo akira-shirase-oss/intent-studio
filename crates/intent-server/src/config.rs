@@ -623,6 +623,13 @@ impl Config {
             env.problems
                 .push(format!("INTENT_OPERATOR_PASSWORD_HASH: {problem}"));
         }
+        // A fingerprintless boot outside development must never reach ready:
+        // there is nothing to sign in under, no sweep that can tell a stale
+        // session from a current one — refuse loudly (I2 review's hazard).
+        if operator_password_hash.is_none() && profile != Profile::Development {
+            env.problems
+                .push("INTENT_OPERATOR_PASSWORD_HASH: required outside development".into());
+        }
         let session_ttl = Duration::from_secs(env.ranged(
             "INTENT_SESSION_TTL_SECS",
             12 * 3600,
@@ -987,6 +994,7 @@ mod tests {
         assert!(!dev.cookie_secure);
 
         // In production, loopback and private targets stay plain-HTTP-deployable.
+        let hash = phc(19_456, 2);
         for url in [
             "http://127.0.0.1:59480/v1/notify",
             "http://[::1]:59480/v1/notify",
@@ -996,8 +1004,13 @@ mod tests {
             "http://172.16.0.9/hook",
             "http://[fd00::1]/hook",
         ] {
-            config(&[db, webhook, ("INTENT_NOTIFY_WEBHOOK_URL", url)])
-                .unwrap_or_else(|e| panic!("{url}: {e}"));
+            config(&[
+                db,
+                webhook,
+                ("INTENT_NOTIFY_WEBHOOK_URL", url),
+                ("INTENT_OPERATOR_PASSWORD_HASH", hash.as_str()),
+            ])
+            .unwrap_or_else(|e| panic!("{url}: {e}"));
         }
         // A public name or address is refused; so is a string that is no URL at all.
         for url in [

@@ -176,17 +176,19 @@ async fn restore_session_memory(app: &App) {
     // Sessions bound to a rotated-out credential are refused at
     // `session_lifetime`, but refusal is not removal: booting the old hash
     // again inside the idle window would revive a thief's cookie. Sweep every
-    // row bound to another fingerprint before readiness — all rows when no
-    // credential is configured (N1; 0008's note that "the next check drops
-    // them" was wrong — the check refused, nothing dropped).
-    match app
-        .sessions
-        .drop_sessions_outside_credential(app.operator_credential_fp.as_deref())
-        .await
-    {
-        Ok(0) => {}
-        Ok(dropped) => tracing::info!(dropped, "dropped sessions bound to other credentials"),
-        Err(_) => tracing::warn!("session fingerprint sweep failed — rotated-out rows persist"),
+    // row bound to another fingerprint before readiness (N1; 0008's note that
+    // "the next check drops them" was wrong — the check refused, nothing
+    // dropped). With no fingerprint configured there is nothing to compare —
+    // the sweep would wipe rows it cannot judge, so it is skipped; outside
+    // development, config refuses a fingerprintless boot at all.
+    if let Some(fp) = app.operator_credential_fp.as_deref() {
+        match app.sessions.drop_sessions_outside_credential(fp).await {
+            Ok(0) => {}
+            Ok(dropped) => {
+                tracing::info!(dropped, "dropped sessions bound to other credentials");
+            }
+            Err(_) => tracing::warn!("session fingerprint sweep failed — rotated-out rows persist"),
+        }
     }
     // Addresses that produced a session inside the known window keep their day
     // budget through a deploy — an empty set after every restart is the D-052
