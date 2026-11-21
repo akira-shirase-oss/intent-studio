@@ -25,6 +25,5 @@ mod auth;
 mod bodies;
 mod fuzz;
 mod headers;
-mod mutation;
 mod replay;
 mod ssrf;

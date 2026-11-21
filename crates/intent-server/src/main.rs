@@ -46,6 +46,13 @@ enum Command {
     /// Read a password from standard input and print its argon2id hash for
     /// `INTENT_OPERATOR_PASSWORD_HASH`.
     HashPassword,
+    /// Apply the process hardening, print the dumpable flag, and exit — the
+    /// shipped-binary proof that `main`'s hardening ran (Linux only). A
+    /// subcommand, not an env var: an `INTENT_PROBE_DUMPABLE` left in a unit's
+    /// EnvironmentFile would turn `serve` into a no-op exit(0) systemd counts
+    /// as success (NEW-5).
+    #[cfg(target_os = "linux")]
+    ProbeDumpable,
     /// Check a run's acknowledgments against the database; exits 1 on any violation.
     Reconcile {
         /// The run's submission-id prefix.
@@ -99,22 +106,10 @@ fn deny_dumpable() -> anyhow::Result<()> {
         .context("prctl(PR_SET_DUMPABLE)")
 }
 
-/// The shipped-binary probe: `INTENT_PROBE_DUMPABLE=1` reports the flag `main` left and
-/// exits before any configuration is read — deleting `deny_dumpable()` above turns the
-/// integration test's answer red.
-#[cfg(target_os = "linux")]
-const PROBE_DUMPABLE_ENV: &str = "INTENT_PROBE_DUMPABLE";
-
-/// Process-level hardening that must hold before the first byte is read — and the probe
-/// the shipped-binary test uses to prove it happened.
+/// Process-level hardening that must hold before the first byte is read.
 #[cfg(target_os = "linux")]
 fn harden_process() -> anyhow::Result<()> {
-    deny_dumpable()?;
-    if std::env::var_os(PROBE_DUMPABLE_ENV).is_some() {
-        println!("{:?}", rustix::process::dumpable_behavior()?);
-        std::process::exit(0);
-    }
-    Ok(())
+    deny_dumpable()
 }
 
 /// `intent-server` — the deployed form: config, telemetry, then the server.
@@ -138,6 +133,10 @@ async fn main() -> anyhow::Result<()> {
     harden_process()?;
     match Cli::parse().command.unwrap_or(Command::Serve) {
         Command::Serve => run_server().await?,
+        #[cfg(target_os = "linux")]
+        Command::ProbeDumpable => {
+            println!("{:?}", rustix::process::dumpable_behavior()?);
+        }
         Command::CheckConfig => {
             let config = match Config::from_env() {
                 Ok(config) => config,

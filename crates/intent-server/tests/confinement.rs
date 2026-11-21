@@ -8,7 +8,7 @@ use std::process::Command;
 #[test]
 fn the_started_server_reports_non_dumpable() {
     let output = Command::new(env!("CARGO_BIN_EXE_intent-server"))
-        .env("INTENT_PROBE_DUMPABLE", "1")
+        .arg("probe-dumpable")
         .output()
         .unwrap();
     assert_eq!(

@@ -69,13 +69,7 @@ npm run build --workspace @intent-studio/workspace
 scripts/check-bundle.sh
 
 step "mutation seams absent from the shipped binary"
-# INTENT_MUTATION and its seams exist only under the `mutation-seams` cargo feature — a
-# default release build must carry no trace of them (the enum, the parse, the seam names).
-cargo build --release --locked -p intent-server
-if strings target/release/intent-server | grep -qE 'INTENT_MUTATION|mutation-seams|no-session-check|no-session-delete|trust-any-forwarded|no-metrics-token|no-request-bound|no-content-type|no-egress-guard|no-lead-dedup|client-session-token'; then
-    echo "the shipped binary carries a mutation seam — the feature leaked into a default build" >&2
-    exit 1
-fi
+scripts/check-seams.sh
 
 step drills
 scripts/drills.sh

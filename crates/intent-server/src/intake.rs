@@ -45,6 +45,20 @@ pub struct Acknowledgment {
     pub duplicate: bool,
 }
 
+/// The body's byte bound. The proof's seam lifts the middleware bound; it must lift this
+/// one too or the body is refused here before the lifted gate is ever exercised.
+#[allow(
+    unused_variables,
+    reason = "the seam reads the config only under the mutation-seams feature"
+)]
+fn body_cap(app: &App) -> usize {
+    if crate::mutated!(app.config, crate::config::Mutation::NoRequestBound) {
+        usize::MAX
+    } else {
+        MAX_BODY_BYTES
+    }
+}
+
 /// The handler.
 pub async fn submit(
     State(app): State<App>,
@@ -80,7 +94,7 @@ pub async fn submit(
         });
     }
 
-    let body = read_body(body).await?;
+    let body = read_body_capped(body, body_cap(&app)).await?;
     let form =
         parse(&headers, &body).inspect_err(|_| Metrics::inc(&metrics.intake_invalid_total))?;
     let lead = form.validate().map_err(|rejection| match rejection {

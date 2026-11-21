@@ -1,30 +1,8 @@
 //! Authentication surface: every operator route refuses forged, absent or dead session
 //! material, and a client cannot choose its own session token.
 
-use crate::support::{ProviderFixture, Server, TestDb, client, drill_env, server_binary};
+use crate::support::{PASSWORD, ProviderFixture, Server, TestDb, client, drill_env, hash};
 use intent_provider_fixture::Mode;
-
-pub(crate) const PASSWORD: &str = "operator test password 7";
-
-/// A hash for `INTENT_OPERATOR_PASSWORD_HASH` (shared by the header attacks).
-pub(crate) fn hash() -> String {
-    use std::io::Write as _;
-    let mut child = std::process::Command::new(server_binary())
-        .arg("hash-password")
-        .stdin(std::process::Stdio::piped())
-        .stdout(std::process::Stdio::piped())
-        .spawn()
-        .unwrap();
-    child
-        .stdin
-        .as_mut()
-        .unwrap()
-        .write_all(format!("{PASSWORD}\n").as_bytes())
-        .unwrap();
-    let output = child.wait_with_output().unwrap();
-    assert!(output.status.success());
-    String::from_utf8(output.stdout).unwrap().trim().to_owned()
-}
 
 async fn start(db: &TestDb, fixture_url: &str) -> Server {
     let mut env = drill_env(db, fixture_url);

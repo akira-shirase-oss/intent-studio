@@ -6,20 +6,31 @@
 
 use std::time::Duration;
 
-use crate::support::{LeadSpec, ProviderFixture, Server, TestDb, client, drill_env, site_for};
+use crate::support::{
+    LeadSpec, PASSWORD, ProviderFixture, Server, TestDb, client, drill_env, hash, site_for,
+};
 use intent_provider_fixture::Mode;
 use serde_json::{Value, json};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
-use crate::auth;
-
-/// A server with one guard switched off by name.
+/// A server with one guard switched off by name. Its own store root: snapshots
+/// need one, and the store is single-root — two servers never share a dir.
 async fn mutated(db: &TestDb, fixture_url: &str, mutation: &str, password: bool) -> Server {
     let mut env = drill_env(db, fixture_url);
     env.retain(|(k, _)| k != "INTENT_COOKIE_SECURE");
     env.push(("INTENT_MUTATION".into(), mutation.into()));
+    env.push((
+        "INTENT_STORE_DIR".into(),
+        std::env::temp_dir()
+            .join(format!(
+                "intent-mut-store-{}",
+                uuid::Uuid::now_v7().simple()
+            ))
+            .display()
+            .to_string(),
+    ));
     if password {
-        env.push(("INTENT_OPERATOR_PASSWORD_HASH".into(), auth::hash()));
+        env.push(("INTENT_OPERATOR_PASSWORD_HASH".into(), hash()));
     }
     Server::start(env).await
 }
@@ -49,11 +60,18 @@ async fn no_session_check_answers_every_cookie() {
 async fn no_session_delete_leaves_the_session_live() {
     let db = TestDb::create(1).await;
     let fixture = ProviderFixture::start(Mode::Ok).await;
-    let server = mutated(&db, &fixture.url, "no-session-delete", true).await;
+    let mut env = drill_env(&db, &fixture.url);
+    env.retain(|(k, _)| k != "INTENT_COOKIE_SECURE");
+    env.push(("INTENT_OPERATOR_PASSWORD_HASH".into(), hash()));
+    // The honest second server shares the database but none of the mutated server's
+    // memory — no tombstone, no unknow — so a live row is the only way replay says 200.
+    let honest = Server::start(env.clone()).await;
+    env.push(("INTENT_MUTATION".into(), "no-session-delete".into()));
+    let server = Server::start(env).await;
     let client = client();
     let response = client
         .post(format!("{}/v1/operator/session", server.base))
-        .json(&json!({ "password": auth::PASSWORD }))
+        .json(&json!({ "password": PASSWORD }))
         .send()
         .await
         .unwrap();
@@ -72,9 +90,10 @@ async fn no_session_delete_leaves_the_session_live() {
         .await
         .unwrap();
     assert!(out.status().is_success());
-    // The dead-session attack asserts 401 on replay; with the delete skipped it passes.
+    // The dead-session attack asserts 401 on replay; with the delete skipped the
+    // honest server — its memory untouched by the fake — reads the live row (M2).
     let replay = client
-        .get(format!("{}/v1/operator/leads", server.base))
+        .get(format!("{}/v1/operator/leads", honest.base))
         .header("cookie", &cookie)
         .send()
         .await
@@ -134,11 +153,10 @@ async fn no_request_bound_reads_the_fat_body() {
     let client = client();
     let site = site_for(0, 1);
     // The oversized attack asserts a refusal; with the bound off the body is read and the
-    // (valid) lead is stored.
-    let fat = serde_json::json!({
-        "submission_id": "fat-mutation-1", "name": "n", "email": "a@b.c", "phone": "1",
-        "message": "x".repeat(64 * 1024), "consent": true, "consent_notice": "v1"
-    });
+    // (valid) lead is stored. The padding must be over the 16 KiB request bound yet under
+    // the lead's own field cap: MESSAGE_MAX_CHARS is chars, so multi-byte chars do it.
+    let mut fat = LeadSpec::new("fatbound", 1).json();
+    fat["message"] = serde_json::Value::String("😀".repeat(5_000));
     let status = client
         .post(format!("{}/v1/sites/{site}/leads", server.base))
         .json(&fat)
@@ -218,7 +236,7 @@ async fn no_egress_guard_fetches_loopback() {
     let cookie = {
         let response = client
             .post(format!("{}/v1/operator/session", server.base))
-            .json(&json!({ "password": auth::PASSWORD }))
+            .json(&json!({ "password": PASSWORD }))
             .send()
             .await
             .unwrap();
@@ -256,7 +274,7 @@ async fn no_egress_guard_fetches_loopback() {
         .json(&json!({
             "business_name": "mut", "goal": "quote_requests", "intent": "quote",
             "audience": "owners", "services": [{ "name": "s" }],
-            "references": [{ "url": fixture.url, "permission": "own_content" }],
+            "references": [{ "url": "http://169.254.169.254/latest/meta-data", "permission": "own_content" }],
             "claims": [],
         }))
         .send()
@@ -266,7 +284,11 @@ async fn no_egress_guard_fetches_loopback() {
         .as_str()
         .unwrap()
         .to_owned();
-    // The SSRF attack asserts 422 fetch_refused on a private address; loopback is private.
+    // The SSRF attack asserts 422 fetch_refused with reason `address_forbidden`; with the
+    // guard off the fetch is attempted — it either reaches the address (201) or fails
+    // downstream of the guard (connect/timeout/http_status), and the recorded refusal
+    // reason is never `address_forbidden`. Egress still refuses non-default ports, so the
+    // target is the metadata address on its default port 80.
     let fetched = client
         .post(format!(
             "{}/v1/operator/tenants/{tenant}/briefs/{brief_id}/snapshots",
@@ -277,16 +299,23 @@ async fn no_egress_guard_fetches_loopback() {
         .send()
         .await
         .unwrap();
-    assert_eq!(
-        fetched.status(),
-        201,
-        "the egress guard still refused a private address"
-    );
-    let stored = fetched.json::<Value>().await.unwrap();
-    assert!(
-        stored["id"].as_str().is_some_and(|id| !id.is_empty()),
-        "no snapshot row for the fetched private address: {stored}"
-    );
+    let status = fetched.status();
+    if status == 422 {
+        let body = fetched.json::<Value>().await.unwrap_or(Value::Null);
+        assert_eq!(body["error"]["code"].as_str(), Some("fetch_refused"));
+        assert_ne!(
+            body["error"]["problems"][0]["code"].as_str(),
+            Some("address_forbidden"),
+            "the egress guard still refused the private address: {body}"
+        );
+    } else {
+        assert_eq!(status, 201, "unexpected status for an unguarded fetch");
+        let stored = fetched.json::<Value>().await.unwrap();
+        assert!(
+            stored["id"].as_str().is_some_and(|id| !id.is_empty()),
+            "no snapshot row for the fetched private address: {stored}"
+        );
+    }
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -324,7 +353,7 @@ async fn no_content_type_accepts_a_bare_withdrawal() {
     let client = client();
     let response = client
         .post(format!("{}/v1/operator/session", server.base))
-        .json(&json!({ "password": auth::PASSWORD }))
+        .json(&json!({ "password": PASSWORD }))
         .send()
         .await
         .unwrap();
@@ -363,7 +392,7 @@ async fn client_session_token_issues_the_client_chosen_token() {
     // response carries exactly the token the client named — proof the guard was real.
     let response = client
         .post(format!("{}/v1/operator/session", server.base))
-        .json(&json!({ "password": auth::PASSWORD, "session": chosen }))
+        .json(&json!({ "password": PASSWORD, "session": chosen }))
         .send()
         .await
         .unwrap();

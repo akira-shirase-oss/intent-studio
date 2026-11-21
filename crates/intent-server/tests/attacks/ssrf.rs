@@ -8,8 +8,6 @@ use crate::support::{ProviderFixture, Server, TestDb, client, drill_env};
 use intent_provider_fixture::Mode;
 use serde_json::{Value, json};
 
-use crate::auth;
-
 /// Targets a client-side URL fetch must never reach.
 const PRIVATE_TARGETS: [&str; 5] = [
     "http://169.254.169.254/latest/meta-data",
@@ -26,7 +24,22 @@ async fn a_snapshot_of_a_private_reference_is_never_fetched() {
     let fixture = ProviderFixture::start(Mode::Ok).await;
     let mut env = drill_env(&db, &fixture.url);
     env.retain(|(k, _)| k != "INTENT_COOKIE_SECURE");
-    env.push(("INTENT_OPERATOR_PASSWORD_HASH".into(), auth::hash()));
+    env.push((
+        "INTENT_OPERATOR_PASSWORD_HASH".into(),
+        crate::support::hash(),
+    ));
+    // Snapshots store the fetched bytes — without a store the endpoint is 503 and
+    // the egress refusal is never reached.
+    env.push((
+        "INTENT_STORE_DIR".into(),
+        std::env::temp_dir()
+            .join(format!(
+                "intent-ssrf-store-{}",
+                uuid::Uuid::now_v7().simple()
+            ))
+            .display()
+            .to_string(),
+    ));
     let server = Server::start(env).await;
     let client = client();
 

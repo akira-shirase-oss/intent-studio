@@ -4,7 +4,7 @@
 	import { resolve } from '$app/paths';
 	import { Button } from '@intent-studio/ui/ui/button';
 	import * as NativeSelect from '@intent-studio/ui/ui/native-select';
-	import { api } from '#lib/api.ts';
+	import { ApiError, api } from '#lib/api.ts';
 	import { session } from '#lib/session.svelte.ts';
 	import { setTheme, theme, type Theme } from '#lib/theme.svelte.ts';
 
@@ -26,10 +26,15 @@
 		try {
 			await api.signOut();
 			session.status = 'signed-out';
-		} catch {
+		} catch (error) {
 			// A 503 means the delete was never confirmed: the session is still live, the
 			// cookie still held — say the sign-out failed and let the operator retry.
-			signOutFailed = true;
+			// A 401 means the server already dropped the cookie; there is nothing to retry.
+			if (error instanceof ApiError && error.status === 401) {
+				session.status = 'signed-out';
+			} else {
+				signOutFailed = true;
+			}
 		} finally {
 			signingOut = false;
 		}

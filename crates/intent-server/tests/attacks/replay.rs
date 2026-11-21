@@ -32,7 +32,7 @@ async fn a_replayed_submission_stores_one_lead() {
     }
 
     let leads = db.leads_with_prefix("replay").await;
-    let ids = leads.get("replay-n00001");
+    let ids = leads.get(&format!("c:{}", spec.submission_id));
     assert_eq!(
         ids.map(Vec::len),
         Some(1),

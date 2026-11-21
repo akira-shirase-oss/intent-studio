@@ -66,6 +66,29 @@ pub fn server_binary() -> &'static str {
     env!("CARGO_BIN_EXE_intent-server")
 }
 
+/// The drill operator's password (shared by the session attacks and proofs).
+pub const PASSWORD: &str = "operator test password 7";
+
+/// A hash for `INTENT_OPERATOR_PASSWORD_HASH`.
+pub fn hash() -> String {
+    use std::io::Write as _;
+    let mut child = Command::new(server_binary())
+        .arg("hash-password")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .spawn()
+        .unwrap();
+    child
+        .stdin
+        .as_mut()
+        .unwrap()
+        .write_all(format!("{PASSWORD}\n").as_bytes())
+        .unwrap();
+    let output = child.wait_with_output().unwrap();
+    assert!(output.status.success());
+    String::from_utf8(output.stdout).unwrap().trim().to_owned()
+}
+
 /// A database of its own, migrated and seeded with `sites` demo sites.
 pub struct TestDb {
     pub name: String,

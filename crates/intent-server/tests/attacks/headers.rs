@@ -5,8 +5,6 @@
 use crate::support::{ProviderFixture, Server, TestDb, client, drill_env};
 use intent_provider_fixture::Mode;
 
-use crate::auth;
-
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[ignore = "needs the stack: scripts/stack.sh up (run by scripts/drills.sh)"]
 async fn forwarded_for_does_not_move_the_per_address_budget() {
@@ -15,7 +13,10 @@ async fn forwarded_for_does_not_move_the_per_address_budget() {
     // No INTENT_TRUSTED_PROXIES: the peer is 127.0.0.1 whoever the request claims to be.
     let mut env = drill_env(&db, &fixture.url);
     env.retain(|(k, _)| k != "INTENT_COOKIE_SECURE");
-    env.push(("INTENT_OPERATOR_PASSWORD_HASH".into(), auth::hash()));
+    env.push((
+        "INTENT_OPERATOR_PASSWORD_HASH".into(),
+        crate::support::hash(),
+    ));
     let server = Server::start(env).await;
     let client = client();
 
