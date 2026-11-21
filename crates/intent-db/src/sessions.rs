@@ -34,7 +34,9 @@ impl Db {
             "UPDATE operator_sessions SET last_seen_at = now()
              WHERE token_digest = $1 AND expires_at > now()
                AND last_seen_at > now() - $2 * interval '1 second'
-             RETURNING extract(epoch from expires_at - now())",
+             // extract(epoch …) is `numeric` on Postgres ≥14 — sqlx maps f64 to FLOAT8 only,
+             // so without the cast every row fails to decode (N15).
+             RETURNING extract(epoch from expires_at - now())::float8",
         )
         .bind(digest.as_slice())
         .bind(f64::from(u32::try_from(idle.as_secs()).unwrap_or(u32::MAX)))
