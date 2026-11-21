@@ -54,7 +54,7 @@ fn cookie_name(app: &App) -> &'static str {
 }
 
 /// How long a successful sign-in makes its address "known" (D-052).
-const KNOWN_ADDRESS_WINDOW: Duration = Duration::from_hours(30 * 24);
+const KNOWN_ADDRESS_WINDOW_MS: u64 = 30 * 24 * 3_600_000;
 
 /// Operator sign-in admission, with time passed in so its rules are tested exactly (N3).
 ///
@@ -65,6 +65,11 @@ pub struct SignInGate {
     per_address: Limiter<AddressKey>,
     known: Limiter<AddressKey>,
     global: Limiter<u8>,
+    /// Addresses that signed in within `KNOWN_ADDRESS_WINDOW` — in memory, so the check can
+    /// never 5xx behind a database and a flood can never reach a pool to starve it (N10).
+    /// A restart loses the set: the operator then shares the global budget like anyone —
+    /// bounded, not locked out.
+    known_addresses: std::sync::Mutex<hashlink::LruCache<AddressKey, u64>>,
 }
 
 impl SignInGate {
@@ -83,6 +88,7 @@ impl SignInGate {
                 10_000,
             ),
             global: Limiter::new(quota(SIGN_IN_GLOBAL_PER_MINUTE), 16),
+            known_addresses: std::sync::Mutex::new(hashlink::LruCache::new(65_536)),
         }
     }
 
@@ -126,6 +132,23 @@ impl SignInGate {
     pub fn give_back_known(&self, address: AddressKey) {
         self.known.refund(address);
     }
+
+    /// A sign-in succeeded from here: remember it for the day-budget window.
+    pub fn mark_address(&self, address: AddressKey, now_ms: u64) {
+        self.known_addresses
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .insert(address, now_ms + KNOWN_ADDRESS_WINDOW_MS);
+    }
+
+    /// Whether this address produced a session inside the window — memory, never I/O.
+    pub fn is_known_address(&self, address: &AddressKey, now_ms: u64) -> bool {
+        self.known_addresses
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .get(address)
+            .is_some_and(|&until| until > now_ms)
+    }
 }
 
 impl Default for SignInGate {
@@ -160,8 +183,6 @@ pub struct SessionGate {
 /// The most a check is trusted: the shorter of this cap, the session's own expiry, and half
 /// its idle timeout (a check must refresh at least that often, or the idle deadline is a lie).
 const VERIFIED_SESSION_MS: u64 = 60_000;
-/// A sign-out's tombstone: long enough to outlive any check that was mid-flight.
-const REVOKED_SESSION_MS: u64 = 60_000;
 
 fn lru<K: Ord + std::hash::Hash, V>() -> hashlink::LruCache<K, V> {
     hashlink::LruCache::new(10_000)
@@ -236,13 +257,15 @@ impl SessionGate {
     }
 
     /// A session is dead the moment sign-out is asked: drop it from both memories and
-    /// tombstone it against a racing re-check. Callers tombstone only a digest that was
-    /// known or whose row was actually deleted — a forged cookie may not fill the bound.
-    pub fn forget(&self, digest: &[u8; 32], now_ms: u64) {
+    /// tombstone it against a racing re-check until `until_ms` — at least as long as the
+    /// row itself could stay live, so an unconfirmed delete can never re-warm (N7). Callers
+    /// tombstone only a digest that was known or whose row was actually deleted — a forged
+    /// cookie may not fill the bound.
+    pub fn forget(&self, digest: &[u8; 32], _now_ms: u64, until_ms: u64) {
         let mut state = self.state();
         state.verified.remove(digest);
         state.known.remove(digest);
-        state.revoked.insert(*digest, now_ms + REVOKED_SESSION_MS);
+        state.revoked.insert(*digest, until_ms);
     }
 
     /// The database says this digest is dead: drop the memory so its next sighting pays
@@ -329,6 +352,9 @@ impl Caller {
 #[serde(deny_unknown_fields)]
 struct SignIn {
     password: String,
+    /// A client-named token is never honored outside the `client-session-token` proof seam:
+    /// the field parses so the seam can prove the guard, and production ignores it.
+    session: Option<String>,
 }
 
 /// `POST /v1/operator/session` with `{"password": "..."}`.
@@ -392,7 +418,8 @@ pub async fn sign_in(
         });
     }
     let body = crate::intake::read_body(body).await?;
-    let SignIn { password } = serde_json::from_slice(&body).map_err(|_| ApiError::MalformedBody)?;
+    let SignIn { password, session } =
+        serde_json::from_slice(&body).map_err(|_| ApiError::MalformedBody)?;
     if password.is_empty() || password.len() > 1024 {
         return Err(ApiError::Unauthorized);
     }
@@ -401,18 +428,12 @@ pub async fn sign_in(
     // signed in from in the last 30 days spends its own day-long budget rather than the
     // shared minute one: a flood from elsewhere cannot lock the operator out of their usual
     // place (D-052), and it cannot guess past its own bound either.
-    // The known-address lookup runs on its own one-connection pool: a cookie flood queuing
-    // on the sessions pool must not turn sign-in into 5xx, and intake's pool is not for it.
-    // If it fails anyway the address is simply unknown and takes the global path — a lookup
-    // outage may never hold the operator's own sign-in at 5xx (D-052).
+    // The known-address set lives in memory: it cannot fail behind a database, and no
+    // unauthenticated path reaches a pool to starve it (N10). A restart forgets it — then
+    // the operator takes the global budget like anyone, bounded but never refused at 5xx.
     let known = app
-        .known_db
-        .signed_in_from_recently(&caller.address, KNOWN_ADDRESS_WINDOW)
-        .await
-        .unwrap_or_else(|error| {
-            tracing::warn!(%error, "known-address lookup failed; treating address as unknown");
-            false
-        });
+        .sign_in
+        .is_known_address(&AddressKey::of(address), app.now_ms());
     let reserved_known = app
         .sign_in
         .reserve_for(known, AddressKey::of(address), app.now_ms())
@@ -433,7 +454,20 @@ pub async fn sign_in(
     } else {
         app.sign_in.give_back();
     }
-    let token = new_token();
+    // The proof's seam: honor a client-named session token so the attack that forbids it
+    // has something to prove — the field is parsed and ignored everywhere else (M3).
+    let token = {
+        #[cfg(feature = "mutation-seams")]
+        if crate::mutated!(app.config, crate::config::Mutation::ClientSessionToken) {
+            session.filter(|t| !t.is_empty()).unwrap_or_else(new_token)
+        } else {
+            new_token()
+        }
+        #[cfg(not(feature = "mutation-seams"))]
+        let _ = session;
+        #[cfg(not(feature = "mutation-seams"))]
+        new_token()
+    };
     app.db
         .create_session(&digest(&token), app.config.session_ttl)
         .await?;
@@ -448,6 +482,7 @@ pub async fn sign_in(
         ),
         now,
     );
+    app.sign_in.mark_address(AddressKey::of(address), now);
     caller
         .audit(&app, "operator.sign_in", "operator", "{}")
         .await?;
@@ -481,9 +516,10 @@ pub async fn session(
 
 /// `DELETE /v1/operator/session`. Revocation is a fact, not a wish: 204 only once the row
 /// is confirmed gone (or was never there for one of ours); anything unconfirmed answers
-/// 503 `{"signed_out":false}` — the cookie is still cleared either way, so a client can
-/// always drop its side. A digest that never proved itself gets 401 like every other
-/// operator route; the tombstone budget stays for digests that were ours or really died.
+/// 503 `{"signed_out":false}` — and keeps the cookie, because the session is still live and
+/// the client must be able to retry rather than be told it is signed out. A digest that
+/// never proved itself gets 401 like every other operator route; tombstones — at least as
+/// long as the row itself could live — stay for digests that were ours or really died.
 pub async fn sign_out(
     State(app): State<App>,
     ConnectInfo(peer): ConnectInfo<Peer>,
@@ -496,12 +532,12 @@ pub async fn sign_out(
         ""
     };
     let clear = format!("{name}=; HttpOnly; SameSite=Strict; Path=/; Max-Age=0{secure}");
-    let answer = |status: StatusCode, body: Option<serde_json::Value>| {
+    let answer = |status: StatusCode, body: Option<serde_json::Value>, clear_cookie: bool| {
         let mut response = match body {
             Some(body) => (status, Json(body)).into_response(),
             None => status.into_response(),
         };
-        if let Ok(value) = HeaderValue::from_str(&clear) {
+        if clear_cookie && let Ok(value) = HeaderValue::from_str(&clear) {
             response.headers_mut().insert(header::SET_COOKIE, value);
         }
         response
@@ -512,18 +548,19 @@ pub async fn sign_out(
     let token_digest = digest(token);
     let now = app.now_ms();
     // Ours — known from a live check, or tombstoned by a sign-out already — ends on the
-    // pool a cookie flood cannot reach; the operator's sign-out never waits behind it.
+    // connection only sign-outs and their retries reach: no unauthenticated path — cookie
+    // flood or sign-in flood — can queue ahead of it (N7 residual).
     // Anyone else pays the check's charge first: an unsigned delete is a database write.
     let ours = app.session_gate.is_known(&token_digest, now)
         || app.session_gate.is_revoked(&token_digest, now);
-    // The proof's seam: report the delete without running it — and without the tombstone
-    // that would refuse the still-live session anyway.
+    // The proof's seam: claim the delete without running it — then evict the memory, so the
+    // replay that must refuse it is answered by the database, not by a warm cache (M2).
     let faked = ours && crate::mutated!(app.config, crate::config::Mutation::NoSessionDelete);
     let deleted = if ours {
         if faked {
             Some(true)
         } else {
-            app.known_db.delete_session(&token_digest).await.ok()
+            app.signout_db.delete_session(&token_digest).await.ok()
         }
     } else {
         let address = AddressKey::of(crate::intake::client_address_of(
@@ -545,29 +582,66 @@ pub async fn sign_out(
             }
         }
     };
+    // The tombstone outlives the session itself: until the row could no longer be live the
+    // digest must never be re-warmed — a delete that was never confirmed is covered by it
+    // while the background retry finishes the job (N7 residual).
+    let until =
+        now.saturating_add(u64::try_from(app.config.session_ttl.as_millis()).unwrap_or(u64::MAX));
     match (deleted, ours) {
         // Confirmed gone — or, for a digest that was ours, confirmed absent: either way it
         // is dead, to the table and to memory.
         (Some(true), _) | (Some(false), true) => {
-            if !faked {
-                app.session_gate.forget(&token_digest, now);
+            if faked {
+                app.session_gate.unknow(&token_digest);
+            } else {
+                app.session_gate.forget(&token_digest, now, until);
             }
-            Ok(answer(StatusCode::NO_CONTENT, None))
+            Ok(answer(StatusCode::NO_CONTENT, None, true))
         }
         // A forged or long-dead digest: nothing was ours to end.
-        (Some(false), false) => Ok(answer(StatusCode::UNAUTHORIZED, None)),
-        // Refused or failed before the row was confirmed gone — say so, do not pretend.
+        (Some(false), false) => Ok(answer(StatusCode::UNAUTHORIZED, None, true)),
+        // Refused or failed before the row was confirmed gone — say so, keep the cookie,
+        // tombstone it for its whole TTL and let the tracked retry finish the delete.
         _ => {
             if ours {
-                // A tombstone is owed to a digest that was ours: it may still be live.
-                app.session_gate.forget(&token_digest, now);
+                app.session_gate.forget(&token_digest, now, until);
+                retry_delete(&app, token_digest);
             }
             Ok(answer(
                 StatusCode::SERVICE_UNAVAILABLE,
                 Some(json!({ "signed_out": false })),
+                false,
             ))
         }
     }
+}
+
+/// A delete the pool refused once keeps retrying on the sign-out connection until the row
+/// is confirmed gone or the session's own expiry makes the retry pointless — the tombstone
+/// covers it either way, and the `JoinSet` keeps the task tracked rather than leaked.
+fn retry_delete(app: &App, token_digest: [u8; 32]) {
+    let sessions = app.signout_db.clone();
+    let deadline = std::time::Instant::now() + app.config.session_ttl;
+    app.retries
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .spawn(async move {
+            let mut backoff = Duration::from_millis(250);
+            loop {
+                match sessions.delete_session(&token_digest).await {
+                    Ok(_) => return,
+                    Err(error) if std::time::Instant::now() < deadline => {
+                        tracing::warn!(%error, "session delete retry failed");
+                        tokio::time::sleep(backoff).await;
+                        backoff = (backoff * 2).min(Duration::from_secs(30));
+                    }
+                    Err(error) => {
+                        tracing::error!(%error, "session delete never confirmed before expiry");
+                        return;
+                    }
+                }
+            }
+        });
 }
 
 #[derive(Deserialize)]
@@ -862,7 +936,7 @@ mod tests {
         assert!(gate.is_known(&digest, 70_000));
         assert!(!gate.is_known(&[9u8; 32], 0));
         // Sign-out tombstones it: a mark inside the tombstone (a racing check) is dropped.
-        gate.forget(&digest, 70_000);
+        gate.forget(&digest, 70_000, 130_000);
         assert!(!gate.is_known(&digest, 70_000));
         gate.mark_verified(digest, 200_000, 70_001);
         assert!(!gate.was_verified(&digest, 70_001));

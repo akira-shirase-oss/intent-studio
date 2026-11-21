@@ -50,9 +50,12 @@ pub struct Inner {
     pub db: Db,
     /// The session table's own small pool, so a flood of bad cookies cannot starve intake's.
     pub sessions: Db,
-    /// The known-address lookup's pool of one: a cookie flood on `sessions` must not make
-    /// sign-in 5xx, and intake's pool is not for it.
-    pub known_db: Db,
+    /// The sign-out connection of one: only operator sign-outs and their tracked retries
+    /// reach it, so no unauthenticated path — cookie flood or sign-in flood — can queue a
+    /// delete behind a 5xx.
+    pub signout_db: Db,
+    /// Sign-out deletes that a refused attempt could not confirm, retried until confirmed.
+    pub retries: std::sync::Mutex<tokio::task::JoinSet<()>>,
     /// Liveness and readiness.
     pub health: Health,
     /// Counters.
@@ -102,7 +105,7 @@ impl App {
         config: Config,
         db: Db,
         sessions: Db,
-        known_db: Db,
+        signout_db: Db,
         health: Health,
         studio: Studio,
     ) -> Self {
@@ -121,7 +124,8 @@ impl App {
             config,
             db,
             sessions,
-            known_db,
+            signout_db,
+            retries: std::sync::Mutex::new(tokio::task::JoinSet::new()),
             health,
         }))
     }

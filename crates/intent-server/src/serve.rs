@@ -154,9 +154,10 @@ fn sessions_db(config: &Config) -> anyhow::Result<Db> {
     .map_err(|e| anyhow::anyhow!("INTENT_DATABASE_URL: {}", e.summary()))
 }
 
-/// The known-address lookup's pool of one: sign-ins are already budgeted, so one connection
-/// serves them — and a cookie flood queuing on `sessions` cannot starve this pool too.
-fn known_db(config: &Config) -> anyhow::Result<Db> {
+/// The sign-out pool of one: nothing unauthenticated reaches it — cookie floods hit
+/// `sessions`, sign-in floods the budgets — so an operator's revoke and its tracked retries
+/// are never queued behind either (D-052 for deletion).
+fn signout_db(config: &Config) -> anyhow::Result<Db> {
     Db::connect_lazy(
         config.database_url.expose(),
         intent_db::PoolLimits {
@@ -189,7 +190,7 @@ pub async fn run(config: Config) -> anyhow::Result<ShutdownOutcome> {
         config.clone(),
         db.clone(),
         sessions_db(&config)?,
-        known_db(&config)?,
+        signout_db(&config)?,
         health.clone(),
         studio,
     );

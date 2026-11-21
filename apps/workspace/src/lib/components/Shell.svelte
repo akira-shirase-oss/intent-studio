@@ -17,9 +17,22 @@
 		{ href: resolve('/assets'), label: 'Assets', match: (p: string) => p.startsWith(resolve('/assets')) }
 	];
 
+	let signingOut = $state(false);
+	let signOutFailed = $state(false);
+
 	async function signOut() {
-		await api.signOut().catch(() => undefined);
-		session.status = 'signed-out';
+		signingOut = true;
+		signOutFailed = false;
+		try {
+			await api.signOut();
+			session.status = 'signed-out';
+		} catch {
+			// A 503 means the delete was never confirmed: the session is still live, the
+			// cookie still held — say the sign-out failed and let the operator retry.
+			signOutFailed = true;
+		} finally {
+			signingOut = false;
+		}
 	}
 </script>
 
@@ -58,7 +71,9 @@
 				<NativeSelect.Option value="light">Light</NativeSelect.Option>
 				<NativeSelect.Option value="dark">Dark</NativeSelect.Option>
 			</NativeSelect.Root>
-			<Button variant="ghost" size="sm" onclick={signOut}>Sign out</Button>
+			<Button variant="ghost" size="sm" disabled={signingOut} onclick={signOut}
+				>{#if signOutFailed}Sign-out failed — retry{:else}Sign out{/if}</Button
+			>
 		</div>
 	</div>
 </header>

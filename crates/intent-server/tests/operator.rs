@@ -311,7 +311,7 @@ async fn a_flood_of_bad_session_cookies_is_limited_and_leaves_intake_alone() {
     };
     // Inside the trust window the digest answers without even a charge.
     assert_eq!(valid().send().await.unwrap().status(), 200);
-    tokio::time::sleep(std::time::Duration::from_secs(61)).await;
+    tokio::time::sleep(std::time::Duration::from_secs(75)).await;
     let mut drained = 0_u32;
     for n in 0..25_u32 {
         let status = client
@@ -373,9 +373,10 @@ async fn a_flood_of_bad_session_cookies_is_limited_and_leaves_intake_alone() {
 }
 
 /// Under a still-drained bucket the operator's sign-out must still land: the delete of a
-/// known digest runs on the pool the flood cannot reach, so the answer is 204 — or an
-/// honest 503 saying unsure — never a 2xx that leaves the row live, and the cookie is
-/// always cleared.
+/// known digest runs on the connection no unauthenticated path reaches, so the answer is
+/// 204 — or an honest 503 saying unsure — never a 2xx that leaves the row live. A 204
+/// clears the cookie; a 503 keeps it, because the session is still live and the client
+/// must be able to retry (N7 residual).
 async fn assert_sign_out_survives(client: &reqwest::Client, base: &str, cookie: &str) {
     let out = client
         .delete(format!("{base}/v1/operator/session"))
@@ -384,20 +385,103 @@ async fn assert_sign_out_survives(client: &reqwest::Client, base: &str, cookie: 
         .send()
         .await
         .unwrap();
-    assert_eq!(
-        out.headers()
-            .get("set-cookie")
-            .and_then(|v| v.to_str().ok())
-            .map(|v| v.contains("Max-Age=0")),
-        Some(true),
-        "sign-out did not clear the cookie"
-    );
+    let cleared = out
+        .headers()
+        .get("set-cookie")
+        .and_then(|v| v.to_str().ok())
+        .is_some_and(|v| v.contains("Max-Age=0"));
     match out.status().as_u16() {
-        204 => {}
-        503 => assert_eq!(
-            out.json::<serde_json::Value>().await.unwrap()["signed_out"],
-            false
-        ),
+        204 => assert!(cleared, "a confirmed sign-out did not clear the cookie"),
+        503 => {
+            assert!(
+                !cleared,
+                "an unconfirmed sign-out dropped the live cookie — the client could never retry"
+            );
+            assert_eq!(
+                out.json::<serde_json::Value>().await.unwrap()["signed_out"],
+                false
+            );
+        }
         status => panic!("sign-out under the flood answered {status}"),
     }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "needs the stack: scripts/stack.sh up (run by scripts/drills.sh)"]
+async fn a_sign_out_the_database_cannot_confirm_stays_revoked_until_the_retry_lands() {
+    let db = TestDb::create(1).await;
+    let fixture = ProviderFixture::start(Mode::Ok).await;
+    let mut env = drill_env(&db, &fixture.url);
+    env.retain(|(k, _)| k != "INTENT_COOKIE_SECURE");
+    env.push(("INTENT_OPERATOR_PASSWORD_HASH".into(), hash()));
+    env.push(("INTENT_TRUSTED_PROXIES".into(), "127.0.0.1".into()));
+    let server = Server::start(env).await;
+    let client = client();
+    let cookie = sign_in(&client, &server.base, PASSWORD, "10.81.0.1", "req-lock").await;
+    assert_eq!(cookie.status(), 200);
+    let cookie = cookie
+        .headers()
+        .get("set-cookie")
+        .unwrap()
+        .to_str()
+        .unwrap()
+        .split(';')
+        .next()
+        .unwrap()
+        .to_owned();
+    let session = format!("{}/v1/operator/session", server.base);
+    let valid = || client.get(&session).header("cookie", &cookie);
+
+    // Hold the session table hostage: the delete must fail, the answer must be honest, and
+    // the tombstone must refuse the still-live row for longer than any old cache window.
+    let mut lock = db.connect().await;
+    sqlx::query("BEGIN").execute(&mut lock).await.unwrap();
+    sqlx::query("LOCK TABLE operator_sessions IN ACCESS EXCLUSIVE MODE")
+        .execute(&mut lock)
+        .await
+        .unwrap();
+    let out = client
+        .delete(&session)
+        .header("cookie", &cookie)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(out.status(), 503, "a blocked delete was still claimed");
+    assert!(
+        out.headers()
+            .get("set-cookie")
+            .is_none_or(|v| !v.to_str().unwrap().contains("Max-Age=0")),
+        "an unconfirmed sign-out dropped the live cookie"
+    );
+    // The row is still live — prove it before the tombstone's claim alone gets credit.
+    let mut rows = db.connect().await;
+    let live: i64 = sqlx::query_scalar("SELECT count(*) FROM operator_sessions")
+        .fetch_one(&mut rows)
+        .await
+        .unwrap();
+    assert_eq!(live, 1, "the row died behind the failed delete");
+    assert_eq!(
+        valid().send().await.unwrap().status(),
+        401,
+        "a still-live row answered after the failed sign-out"
+    );
+
+    // Free the table: the tracked retry must finish the delete without another request.
+    sqlx::query("ROLLBACK").execute(&mut lock).await.unwrap();
+    drop(lock);
+    let mut gone = false;
+    for _ in 0..40 {
+        let live: i64 = sqlx::query_scalar("SELECT count(*) FROM operator_sessions")
+            .fetch_one(&mut rows)
+            .await
+            .unwrap();
+        if live == 0 {
+            gone = true;
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(250)).await;
+    }
+    assert!(gone, "the background retry never deleted the row");
+    assert_eq!(valid().send().await.unwrap().status(), 401);
+    db.drop_database().await;
 }
