@@ -12,5 +12,12 @@ scripts/stack.sh up
 # The asset worker is a binary of its own crate; the asset drill runs the real one.
 cargo build --release --locked -p intent-worker
 cargo test --release --locked -p intent-server \
-    --no-fail-fast --test harness --test intake --test operator --test studio --test assets --test connections --test outbox_fencing --test notifier_pool --test readiness --test attacks --test drill_notify_down --test drill_kill --test drill_db_down \
+    --no-fail-fast --test harness --test intake --test operator --test studio --test assets --test connections --test outbox_fencing --test notifier_pool --test readiness --test drill_notify_down --test drill_kill --test drill_db_down \
+    -- --ignored
+# The attacks suite runs against a mutation-seams build: mutation.rs's proofs need the
+# seams compiled in (they set INTENT_MUTATION per boot); the plain attacks confirm every
+# seam still refuses when the variable is unset. Without the feature the proofs go red —
+# which is the point: a server cannot be tricked into carrying them.
+cargo test --release --locked -p intent-server --features mutation-seams \
+    --no-fail-fast --test attacks \
     -- --ignored

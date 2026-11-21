@@ -62,8 +62,11 @@ pub enum Profile {
 
 /// A protection switched off on purpose — the mutation-proof seam (`INTENT_MUTATION`).
 /// Every attack test earns its place by going red without the guard it exercises; these
-/// are those guards. Parsing refuses the variable outside development, so a production
-/// boot can never carry one.
+/// are those guards. The enum exists only under the `mutation-seams` cargo feature — a
+/// shipped build cannot parse the variable, cannot carry a mutation, and cannot be
+/// tricked into one by a profile misconfiguration. With the feature on, parsing still
+/// refuses the variable outside development.
+#[cfg(feature = "mutation-seams")]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Mutation {
     /// `require_operator` passes every request, cookie or not.
@@ -147,6 +150,8 @@ pub struct Config {
     pub profile: Profile,
     /// `INTENT_MUTATION`: the guard this boot leaves off — development only (see
     /// [`Mutation`]); the attack suite's mutation proof needs a boot to answer vulnerable.
+    /// Only exists under `mutation-seams`.
+    #[cfg(feature = "mutation-seams")]
     pub mutation: Option<Mutation>,
     /// Listen address.
     pub bind: SocketAddr,
@@ -318,14 +323,11 @@ fn http_target_is_local(url: &url::Url) -> bool {
 
 impl Config {
     /// Whether this boot carries a given mutation (never outside development — the parser
-    /// refuses the variable there).
+    /// refuses the variable there; never without `mutation-seams`, where no such value
+    /// can exist).
+    #[cfg(feature = "mutation-seams")]
     pub fn mutation_is(&self, mutation: Mutation) -> bool {
         self.mutation == Some(mutation)
-    }
-
-    /// Whether forwarded-for headers are believed outright (mutation proof only).
-    pub fn trust_any_forwarded(&self) -> bool {
-        self.mutation_is(Mutation::TrustAnyForwarded)
     }
 
     /// Reads the configuration through `lookup` (the process environment in production, a map
@@ -349,6 +351,7 @@ impl Config {
                 Profile::Production
             }
         };
+        #[cfg(feature = "mutation-seams")]
         let mutation = match env.raw("INTENT_MUTATION").as_deref().map(str::trim) {
             None => None,
             Some("no-session-check") => Some(Mutation::NoSessionCheck),
@@ -366,6 +369,7 @@ impl Config {
                 None
             }
         };
+        #[cfg(feature = "mutation-seams")]
         if mutation.is_some() && profile != Profile::Development {
             env.problems.push(
                 "INTENT_MUTATION switches off protections and exists only under INTENT_PROFILE=development".into(),
@@ -664,6 +668,7 @@ impl Config {
         match database_url {
             Some(database_url) if env.problems.is_empty() => Ok(Self {
                 profile,
+                #[cfg(feature = "mutation-seams")]
                 mutation,
                 bind,
                 database_url,
@@ -700,6 +705,24 @@ impl Config {
     pub fn from_env() -> Result<Self, ConfigError> {
         Self::from_lookup(|key| std::env::var_os(key).map(|v| v.to_string_lossy().into_owned()))
     }
+}
+
+/// True when this boot's `INTENT_MUTATION` is `mutation`. Without the `mutation-seams`
+/// feature the mutation argument is never even looked at — the enum is not in the binary,
+/// the variable is not parsed, and the answer is statically `false`.
+#[cfg(feature = "mutation-seams")]
+#[macro_export]
+macro_rules! mutated {
+    ($config:expr, $mutation:expr) => {
+        $config.mutation_is($mutation)
+    };
+}
+#[cfg(not(feature = "mutation-seams"))]
+#[macro_export]
+macro_rules! mutated {
+    ($config:expr, $mutation:expr) => {
+        false
+    };
 }
 
 #[cfg(test)]

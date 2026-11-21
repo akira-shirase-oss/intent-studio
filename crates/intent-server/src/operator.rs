@@ -282,7 +282,7 @@ impl Caller {
             headers,
             peer.ip(),
             &app.config.trusted_proxies,
-            app.config.trust_any_forwarded(),
+            crate::mutated!(app.config, crate::config::Mutation::TrustAnyForwarded),
         );
         let request_id = headers
             .get(&crate::app::REQUEST_ID)
@@ -373,7 +373,7 @@ pub async fn sign_in(
         &headers,
         peer.ip(),
         &app.config.trusted_proxies,
-        app.config.trust_any_forwarded(),
+        crate::mutated!(app.config, crate::config::Mutation::TrustAnyForwarded),
     );
     // JSON only: a cross-site form cannot send it without a preflight. Checked before the
     // per-address charge so requests that cannot be sign-in attempts cannot churn the
@@ -382,7 +382,7 @@ pub async fn sign_in(
         .get(header::CONTENT_TYPE)
         .and_then(|v| v.to_str().ok())
         .is_some_and(|v| v.starts_with("application/json"));
-    if !is_json && app.config.mutation != Some(crate::config::Mutation::NoContentType) {
+    if !is_json && !crate::mutated!(app.config, crate::config::Mutation::NoContentType) {
         return Err(ApiError::UnsupportedMediaType);
     }
     // Per address first, alone: a request refused here never touches a verification budget.
@@ -518,10 +518,7 @@ pub async fn sign_out(
         || app.session_gate.is_revoked(&token_digest, now);
     // The proof's seam: report the delete without running it — and without the tombstone
     // that would refuse the still-live session anyway.
-    let faked = ours
-        && app
-            .config
-            .mutation_is(crate::config::Mutation::NoSessionDelete);
+    let faked = ours && crate::mutated!(app.config, crate::config::Mutation::NoSessionDelete);
     let deleted = if ours {
         if faked {
             Some(true)
@@ -533,7 +530,7 @@ pub async fn sign_out(
             &headers,
             peer.ip(),
             &app.config.trusted_proxies,
-            app.config.trust_any_forwarded(),
+            crate::mutated!(app.config, crate::config::Mutation::TrustAnyForwarded),
         ));
         if app.session_gate.charge(address, now).is_err() {
             None // the check could not even be afforded — nothing is confirmed
@@ -666,7 +663,7 @@ pub(crate) async fn require_operator(
     peer: Peer,
     headers: &HeaderMap,
 ) -> Result<(), ApiError> {
-    if app.config.mutation == Some(crate::config::Mutation::NoSessionCheck) {
+    if crate::mutated!(app.config, crate::config::Mutation::NoSessionCheck) {
         return Ok(());
     }
     let Some(token) = session_token(headers, cookie_name(app)) else {
@@ -692,7 +689,7 @@ pub(crate) async fn require_operator(
         headers,
         peer.ip(),
         &app.config.trusted_proxies,
-        app.config.trust_any_forwarded(),
+        crate::mutated!(app.config, crate::config::Mutation::TrustAnyForwarded),
     ));
     if !known && let Err(RetryAfter(secs)) = app.session_gate.charge(address, now) {
         return Err(ApiError::RateLimited {

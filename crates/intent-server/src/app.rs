@@ -207,10 +207,7 @@ async fn readyz(State(app): State<App>) -> Response {
 /// reverse proxy would otherwise turn into a public page.
 fn may_read_metrics(app: &App, peer: Peer, headers: &axum::http::HeaderMap) -> bool {
     use sha2::{Digest as _, Sha256};
-    if app
-        .config
-        .mutation_is(crate::config::Mutation::NoMetricsToken)
-    {
+    if crate::mutated!(app.config, crate::config::Mutation::NoMetricsToken) {
         return true;
     }
     match &app.config.metrics_token {
@@ -379,14 +376,12 @@ fn untrusted_routes(app: &App) -> Router<App> {
 pub fn router(app: App) -> Router {
     // The proof's seam: with the bound off, a dribbled body is held for hours and a body
     // over 16 KiB reads in full — exactly what the bounded-bodies attacks refuse.
-    let (request_timeout, body_bytes) = if app
-        .config
-        .mutation_is(crate::config::Mutation::NoRequestBound)
-    {
-        (Duration::from_secs(3600), usize::MAX)
-    } else {
-        (app.config.request_timeout, MAX_BODY_BYTES)
-    };
+    let (request_timeout, body_bytes) =
+        if crate::mutated!(app.config, crate::config::Mutation::NoRequestBound) {
+            (Duration::from_secs(3600), usize::MAX)
+        } else {
+            (app.config.request_timeout, MAX_BODY_BYTES)
+        };
     let workspace = app.config.workspace_dir.clone();
     // I0: intake, health, metrics, the operator session and inbox, the workspace app. Bodies
     // are at most 16 KiB (D-019).

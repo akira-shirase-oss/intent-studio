@@ -421,10 +421,7 @@ pub async fn fetch_snapshot(
         .ok_or(ApiError::NotFound)?;
 
     // Outside any transaction (invariant 2): the guard decides, then the outcome is recorded.
-    let outcome = if app
-        .config
-        .mutation_is(crate::config::Mutation::NoEgressGuard)
-    {
+    let outcome = if crate::mutated!(app.config, crate::config::Mutation::NoEgressGuard) {
         app.studio
             .egress
             .fetch_unchecked(&reference.url, Purpose::Page)

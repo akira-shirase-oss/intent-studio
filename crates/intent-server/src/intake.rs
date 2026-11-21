@@ -16,10 +16,10 @@ use axum::{
 use intent_db::{NewLead, StoreOutcome};
 use intent_domain::{
     ids::{LeadId, OutboxId, SiteId},
-    lead::{ClientSubmissionId, LeadForm, Rejection},
+    lead::{LeadForm, Rejection},
     limits::MAX_BODY_BYTES,
     ratelimit::{AddressKey, RetryAfter, client_address},
-    submission::{StoredKey, SubmissionKeys, fingerprint, keys_for},
+    submission::{fingerprint, keys_for},
 };
 use serde::Serialize;
 use std::net::IpAddr;
@@ -70,7 +70,7 @@ pub async fn submit(
         &headers,
         peer.ip(),
         &app.config.trusted_proxies,
-        app.config.trust_any_forwarded(),
+        crate::mutated!(app.config, crate::config::Mutation::TrustAnyForwarded),
     );
     let now = app.now_ms();
     if let Err(RetryAfter(secs)) = app.address_limiter.check(AddressKey::of(address), now) {
@@ -111,12 +111,14 @@ pub async fn submit(
     let received_at = OffsetDateTime::now_utc();
     let content = fingerprint(&lead);
     let mut keys = keys_for(site, &lead, &content, received_at.unix_timestamp());
-    if app.config.mutation_is(crate::config::Mutation::NoLeadDedup) {
+    if crate::mutated!(app.config, crate::config::Mutation::NoLeadDedup) {
         // The proof's seam: a fresh key per submission means the `(site, key)` unique
         // constraint can never fire — every retry is stored as its own lead.
-        if let Ok(id) = ClientSubmissionId::parse(&format!("m{}", Uuid::now_v7().simple())) {
-            keys = SubmissionKeys {
-                primary: StoredKey::client(&id),
+        if let Ok(id) =
+            intent_domain::lead::ClientSubmissionId::parse(&format!("m{}", Uuid::now_v7().simple()))
+        {
+            keys = intent_domain::submission::SubmissionKeys {
+                primary: intent_domain::submission::StoredKey::client(&id),
                 previous_window: None,
             };
         }
