@@ -132,6 +132,9 @@ pub struct Sanitized {
     pub svg: String,
     /// Elements and attributes dropped.
     pub removed: u32,
+    /// The first refused items as `element` or `element@attribute`, so callers can report
+    /// what the sanitizer dropped rather than only count it — bounded against hostile size.
+    pub dropped: Vec<String>,
     /// The root's width in pixels, when it states one (or the viewBox's).
     pub width: Option<u32>,
     /// The root's height in pixels, when it states one (or the viewBox's).
@@ -164,6 +167,7 @@ pub fn sanitize(input: &[u8]) -> Result<Sanitized, WorkerRefusal> {
     let mut writer = Writer {
         out: String::with_capacity(trimmed.len()),
         removed: 0,
+        dropped: Vec::new(),
         ids: std::collections::HashSet::new(),
     };
     writer.element(root, 0, true);
@@ -201,6 +205,7 @@ pub fn sanitize(input: &[u8]) -> Result<Sanitized, WorkerRefusal> {
     Ok(Sanitized {
         svg: writer.out,
         removed: writer.removed,
+        dropped: writer.dropped,
         width,
         height,
     })
@@ -305,6 +310,7 @@ fn value_is_safe(value: &str, strict: bool) -> bool {
         // The name is the run of name characters before `(`; taking it with rsplit (a char
         // scan, not byte math) means a non-ASCII byte can never be sliced mid-character.
         let name = rest[..open]
+            .trim_end()
             .rsplit(|c: char| !(c.is_ascii_alphanumeric() || c == '-'))
             .next()
             .unwrap_or("");
@@ -338,13 +344,9 @@ fn fragment_id(inner: &str) -> Option<&str> {
     } else {
         inner
     };
-    if unquoted.len() < 2 || !unquoted.starts_with('#') {
-        return None;
-    }
-    unquoted[1..]
-        .chars()
-        .all(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '-' | '.' | ':'))
-        .then_some(&unquoted[1..])
+    // The emitter and the expansion counter share `is_fragment` — a reference that renders
+    // but is never counted is a bomb the budget cannot see (N14).
+    is_fragment(unquoted).then_some(&unquoted[1..])
 }
 
 /// The only form `mask`/`clip-path` may carry: exactly `url(#id)` — canonical lowercase
@@ -488,23 +490,35 @@ fn is_fragment(value: &str) -> bool {
     })
 }
 
+/// Refusals are reported up to this many, then only counted.
+const MAX_DROPPED_REPORTED: usize = 64;
+
 struct Writer {
     out: String,
     removed: u32,
+    /// What was refused: `element` or `element@attribute` names, capped for reporting.
+    dropped: Vec<String>,
     /// `id` values already emitted: a browser resolves a fragment to the first element with
     /// the id, so a later duplicate `id` is dropped, never written.
     ids: std::collections::HashSet<String>,
 }
 
 impl Writer {
+    fn dropped(&mut self, what: String) {
+        self.removed += 1;
+        if self.dropped.len() < MAX_DROPPED_REPORTED {
+            self.dropped.push(what);
+        }
+    }
+
     fn element(&mut self, node: Node<'_, '_>, depth: usize, is_root: bool) {
         let tag = node.tag_name();
-        let allowed = tag.namespace() == Some(SVG_NS) && ELEMENTS.contains(&tag.name());
+        let name = tag.name();
+        let allowed = tag.namespace() == Some(SVG_NS) && ELEMENTS.contains(&name);
         if !allowed || depth > MAX_DEPTH {
-            self.removed += 1;
+            self.dropped(name.to_string());
             return;
         }
-        let name = tag.name();
         let _ = write!(self.out, "<{name}");
         if is_root {
             self.out.push_str(" xmlns=\"http://www.w3.org/2000/svg\"");
@@ -563,7 +577,7 @@ impl Writer {
                 }
                 self.out.push('"');
             } else {
-                self.removed += 1;
+                self.dropped(format!("{name}@{key}"));
             }
         }
         if href_emitted {
@@ -813,6 +827,67 @@ mod tests {
             sanitize(&doc(&bomb)),
             Err(WorkerRefusal::TooLarge),
             "mask fan-out escaped the expansion bound"
+        );
+    }
+
+    #[test]
+    fn a_too_long_fragment_id_can_never_be_emitted() {
+        // N14: `is_fragment` caps ids at 200 bytes — the emitter and the expansion counter
+        // share it, so an id that is emitted is an id that is counted. A 201-char mask id
+        // is dropped whole, and the bomb cannot name it either way.
+        let long = "m".repeat(201);
+        let bomb =
+            format!("<defs><mask id=\"{long}\"><rect/></mask></defs><rect mask=\"url(#{long})\"/>");
+        let out = sanitized(&bomb);
+        assert!(
+            !out.contains("mask="),
+            "a 201-char mask id was emitted: {out}"
+        );
+        // A document that only chains legal ids still pays: 20 masks of two refs each —
+        // 2^20 rendered — refuse on the count, not the spelling.
+        let mut chain = String::from("<defs>");
+        for k in 0..20_u32 {
+            let _ = write!(
+                chain,
+                "<mask id=\"m{k}\"><rect/><rect mask=\"url(#m{})\"/></mask>",
+                k + 1
+            );
+        }
+        chain.push_str("</defs><rect mask=\"url(#m0)\"/>");
+        assert_eq!(
+            sanitize(&doc(&chain)),
+            Err(WorkerRefusal::TooLarge),
+            "a legal-id mask chain escaped the expansion bound"
+        );
+    }
+
+    #[test]
+    fn whitespace_before_a_function_paren_is_legal_svg_and_refusals_are_reported() {
+        // SVG 1.1 grammar allows `rotate (45)` — the name must be read past the space.
+        let out = sanitized("<rect transform=\"rotate (45)\"/>");
+        assert!(
+            out.contains("rotate (45)"),
+            "a legal transform was dropped: {out}"
+        );
+        // What is dropped is reported by name, not only counted: a foreign element and a
+        // refused attribute both land in `dropped`.
+        let clean = sanitize(&doc(
+            "<rect fill=\"url(#a)/*x*/\"/><script/><rect badattr=\"x\"/>",
+        ))
+        .unwrap();
+        assert_eq!(clean.removed, 3, "{:?}", clean.dropped);
+        assert!(
+            clean.dropped.contains(&"script".to_owned()),
+            "{:?}",
+            clean.dropped
+        );
+        assert!(
+            clean
+                .dropped
+                .iter()
+                .any(|d| d == "rect@fill" || d == "rect@badattr"),
+            "{:?}",
+            clean.dropped
         );
     }
 

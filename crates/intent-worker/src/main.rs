@@ -137,6 +137,7 @@ fn answer(result: Result<intent_render::Processed, WorkerRefusal>) -> std::io::R
                 width: processed.width,
                 height: processed.height,
                 removed_parts: Some(processed.removed_parts),
+                dropped_parts: Some(processed.dropped_parts),
                 length: Some(processed.output.len()),
                 refusal: None,
             };
@@ -151,6 +152,7 @@ fn answer(result: Result<intent_render::Processed, WorkerRefusal>) -> std::io::R
                 width: None,
                 height: None,
                 removed_parts: None,
+                dropped_parts: None,
                 length: None,
                 refusal: Some(refusal),
             };

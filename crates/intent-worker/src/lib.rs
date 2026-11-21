@@ -26,6 +26,7 @@ pub fn process(kind: AssetKind, input: &[u8]) -> Result<Processed, WorkerRefusal
                 width: clean.width,
                 height: clean.height,
                 removed_parts: clean.removed,
+                dropped_parts: clean.dropped,
                 output: clean.svg.into_bytes(),
             })
         }
@@ -36,6 +37,7 @@ pub fn process(kind: AssetKind, input: &[u8]) -> Result<Processed, WorkerRefusal
                 width: Some(image.width),
                 height: Some(image.height),
                 removed_parts: 0,
+                dropped_parts: Vec::new(),
                 output: image.bytes,
             })
         }
@@ -46,6 +48,7 @@ pub fn process(kind: AssetKind, input: &[u8]) -> Result<Processed, WorkerRefusal
                 width: None,
                 height: None,
                 removed_parts: 0,
+                dropped_parts: Vec::new(),
                 output: input.to_vec(),
             })
         }

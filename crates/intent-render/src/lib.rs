@@ -153,6 +153,9 @@ pub struct Header {
     /// Elements and attributes the sanitizer dropped.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub removed_parts: Option<u32>,
+    /// The names of what was refused (`element` or `element@attribute`), bounded.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub dropped_parts: Option<Vec<String>>,
     /// Output bytes that follow the header.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub length: Option<usize>,
@@ -172,6 +175,8 @@ pub struct Processed {
     pub height: Option<u32>,
     /// What the sanitizer dropped.
     pub removed_parts: u32,
+    /// The names of the first refused items, for reporting (bounded by the sanitizer).
+    pub dropped_parts: Vec<String>,
     /// The bytes to store and serve.
     pub output: Vec<u8>,
 }
@@ -216,6 +221,7 @@ pub fn decode_answer(stdout: &[u8]) -> Result<Processed, WorkerRefusal> {
                 width: header.width,
                 height: header.height,
                 removed_parts: header.removed_parts.unwrap_or(0),
+                dropped_parts: header.dropped_parts.unwrap_or_default(),
                 output: body.to_vec(),
             })
         }
@@ -331,6 +337,7 @@ mod tests {
             width: Some(2),
             height: Some(3),
             removed_parts: None,
+            dropped_parts: None,
             length: Some(4),
             refusal: None,
         };
@@ -361,6 +368,7 @@ mod tests {
             width: None,
             height: None,
             removed_parts: None,
+            dropped_parts: None,
             length: None,
             refusal: Some(WorkerRefusal::Malformed),
         };
