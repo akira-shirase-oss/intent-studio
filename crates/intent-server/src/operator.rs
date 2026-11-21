@@ -449,11 +449,6 @@ pub async fn sign_in(
         .map_err(|RetryAfter(secs)| ApiError::RateLimited {
             retry_after_secs: secs,
         })?;
-    // The audit records which credential the sign-in proved: a restart seeds the
-    // known-address set only from sign-ins under the CURRENT credential, so a thief's
-    // old sign-ins stop conferring the day budget at rotation (D-069). Computed
-    // before the hash moves into verification.
-    let credential_fp = credential_fingerprint(&hash);
     let verified = verify_password(&app, hash, password).await?;
     if !verified {
         tracing::info!("operator sign-in refused");
@@ -482,8 +477,13 @@ pub async fn sign_in(
         #[cfg(not(feature = "mutation-seams"))]
         new_token()
     };
+    // The session records which credential issued it: a rotation ends it (F1), and
+    // the audit records which credential the sign-in proved so a restart seeds the
+    // known-address set only under the CURRENT credential (D-069). The hash is
+    // configured — `operator_password_hash` was Some — so the fingerprint is too.
+    let credential_fp = app.operator_credential_fp.clone().unwrap_or_default();
     app.db
-        .create_session(&digest(&token), app.config.session_ttl)
+        .create_session(&digest(&token), app.config.session_ttl, &credential_fp)
         .await?;
     // A fresh session is warm: the first requests after sign-in answer from memory.
     let now = app.now_ms();
@@ -497,7 +497,7 @@ pub async fn sign_in(
         now,
     );
     app.sign_in.mark_address(AddressKey::of(address), now);
-    let detail = json!({ "credential_fp": credential_fp }).to_string();
+    let detail = json!({ "credential_fp": &credential_fp }).to_string();
     caller
         .audit(&app, "operator.sign_in", "operator", &detail)
         .await?;
@@ -764,9 +764,16 @@ pub(crate) async fn require_operator(
             retry_after_secs: secs,
         });
     }
+    // Only a session issued under the CURRENT credential counts: a rotated password
+    // ends every session the rotated-out hash created (F1). No credential configured
+    // means no valid session exists — the empty fingerprint matches nothing.
     match app
         .sessions
-        .session_lifetime(&token_digest, app.config.session_idle)
+        .session_lifetime(
+            &token_digest,
+            app.config.session_idle,
+            app.operator_credential_fp.as_deref().unwrap_or_default(),
+        )
         .await
     {
         Ok(Some(remaining_secs)) => {

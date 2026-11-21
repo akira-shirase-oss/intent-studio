@@ -22,12 +22,26 @@ async fn session_lifetime_returns_the_remaining_seconds_of_a_live_row() {
     db.migrate().await.expect("migrations apply on the stack");
 
     let digest: [u8; 32] = *b"n15-live-session-digest-padded32";
-    db.create_session(&digest, Duration::from_secs(300))
+    let fp = "0123456789abcdef0123456789abcdef";
+    db.create_session(&digest, Duration::from_secs(300), fp)
         .await
         .expect("the session row inserts");
 
+    // A rotated credential ends the session at the row — the F1 check.
+    assert!(
+        db.session_lifetime(
+            &digest,
+            Duration::from_secs(600),
+            "fedcba9876543210fedcba9876543210"
+        )
+        .await
+        .expect("the query runs")
+        .is_none(),
+        "a session issued under another fingerprint answered"
+    );
+
     let remaining = db
-        .session_lifetime(&digest, Duration::from_secs(600))
+        .session_lifetime(&digest, Duration::from_secs(600), fp)
         .await
         .expect("the RETURNING value decodes — numeric without ::float8 fails here (N15)")
         .expect("a live row reports its remaining lifetime");
@@ -38,7 +52,7 @@ async fn session_lifetime_returns_the_remaining_seconds_of_a_live_row() {
 
     assert!(db.delete_session(&digest).await.unwrap());
     assert!(
-        db.session_lifetime(&digest, Duration::from_secs(600))
+        db.session_lifetime(&digest, Duration::from_secs(600), fp)
             .await
             .unwrap()
             .is_none()

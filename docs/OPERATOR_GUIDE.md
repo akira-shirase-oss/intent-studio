@@ -124,6 +124,22 @@ the env file stays root-only `0600`, readable only by systemd.
    Add the first client on the **Facts** screen (*Add a client*), record its facts and their
    approvals, upload its logo on **Assets**, and write its brief on **Briefs**.
 
+## Rotating the operator password
+
+1. Hash the new password exactly as in *First run*, step 2 — Argon2's salt is fresh each run.
+2. Replace `INTENT_OPERATOR_PASSWORD_HASH` in `/etc/intent-studio/intent-studio.env`.
+3. `sudo systemctl restart intent-studio`.
+
+Rotation ends every session the old credential issued: each session row records the
+fingerprint of the hash that created it and only the current fingerprint authenticates, so
+a stolen cookie dies at its next request — no list to revoke, nothing to wait for. Every
+operator signs in again under the new password.
+
+The deliberate trade-off, once per rotation (D-069): boot restores each known address's
+day-long sign-in budget only from sign-ins made under the *current* credential, so a usual
+address rejoins the shared 20/minute budget until the first successful sign-in under the
+new password restores it.
+
 ## Upgrade
 
 1. Take a backup (below) and copy it off the host.
@@ -137,6 +153,13 @@ the env file stays root-only `0600`, readable only by systemd.
 5. `sudo systemctl restart intent-studio`. The old process drains first: readiness turns false,
    in-flight requests get up to 10 seconds, the notifier finishes its attempts in flight.
 6. Check `journalctl -u intent-studio -n 50` and `/readyz`.
+
+One-time effect of the first boot on the credential-fingerprint build (the migration adding
+`credential_fp` to `operator_sessions` and `operator_audit` sign-in details): sign-in audit
+rows written before that build carry `detail = {}` — no fingerprint — so the boot seeds no
+known addresses at all. Every address rejoins the shared 20/minute sign-in budget until its
+next successful sign-in, which seeds it for the current credential. Existing session cookies
+from before the migration also fail their first check — everyone signs in once.
 
 To go back, restore the backup from step 1 and the previous binaries; a newer schema is not
 guaranteed to run older binaries.

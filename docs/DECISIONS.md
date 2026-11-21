@@ -947,6 +947,17 @@ starting values; changing one needs a measurement and a new entry.
   conferring the 100/day budget the moment it happens, at the cost of
   the operator's usual address also losing it until it signs in once
   under the new password — the trade-off a rotation is for.
+  The same fingerprint binds the session itself: `operator_sessions.
+  credential_fp` records the issuing hash and `session_lifetime`
+  counts only a row under the current fingerprint, so rotating the
+  password ends every session the rotated-out credential issued — a
+  stolen cookie dies at its next request (F1; a session previously
+  outlived rotation until absolute expiry). Two one-time upgrade
+  costs are accepted (F5): sign-in audit rows written before this
+  decision carry `detail = {}` and seed nothing on the first boot —
+  every address rejoins the shared budget until its next successful
+  sign-in — and sessions issued before the migration match no
+  fingerprint, so every operator signs in once.
 
 ## Open questions (still open)
 

@@ -6,14 +6,21 @@ use std::time::Duration;
 use crate::{Db, DbError, classify};
 
 impl Db {
-    /// Stores a new session.
-    pub async fn create_session(&self, digest: &[u8; 32], ttl: Duration) -> Result<(), DbError> {
+    /// Stores a new session, recording which credential issued it (F1): a rotation
+    /// must end sessions issued under the rotated-out credential.
+    pub async fn create_session(
+        &self,
+        digest: &[u8; 32],
+        ttl: Duration,
+        credential_fp: &str,
+    ) -> Result<(), DbError> {
         sqlx::query(
-            "INSERT INTO operator_sessions (token_digest, expires_at)
-             VALUES ($1, now() + $2 * interval '1 second')",
+            "INSERT INTO operator_sessions (token_digest, expires_at, credential_fp)
+             VALUES ($1, now() + $2 * interval '1 second', $3)",
         )
         .bind(digest.as_slice())
         .bind(f64::from(u32::try_from(ttl.as_secs()).unwrap_or(u32::MAX)))
+        .bind(credential_fp)
         .execute(&self.pool)
         .await
         .map(|_| ())
@@ -21,14 +28,17 @@ impl Db {
     }
 
     /// Seconds of lifetime left for the session with this digest if it exists, has not
-    /// expired and was used within `idle`; a live session is touched in the same statement,
-    /// so use keeps it alive. The remaining time is computed at the database so the caller
-    /// never compares a monotonic clock against `expires_at`'s epoch — the bound it puts
-    /// on trusting this check must come in the same units.
+    /// expired, was used within `idle` AND was issued under the current credential —
+    /// a rotated credential ends its sessions at the first check (F1). A live session
+    /// is touched in the same statement, so use keeps it alive. The remaining time is
+    /// computed at the database so the caller never compares a monotonic clock against
+    /// `expires_at`'s epoch — the bound it puts on trusting this check must come in
+    /// the same units.
     pub async fn session_lifetime(
         &self,
         digest: &[u8; 32],
         idle: Duration,
+        credential_fp: &str,
     ) -> Result<Option<f64>, DbError> {
         // extract(epoch …) is `numeric` on Postgres ≥14 — sqlx maps f64 to FLOAT8 only,
         // so without the cast every row fails to decode (N15).
@@ -36,31 +46,13 @@ impl Db {
             "UPDATE operator_sessions SET last_seen_at = now()
              WHERE token_digest = $1 AND expires_at > now()
                AND last_seen_at > now() - $2 * interval '1 second'
+               AND credential_fp = $3
              RETURNING extract(epoch from expires_at - now())::float8",
         )
         .bind(digest.as_slice())
         .bind(f64::from(u32::try_from(idle.as_secs()).unwrap_or(u32::MAX)))
+        .bind(credential_fp)
         .fetch_optional(&self.pool)
-        .await
-        .map_err(classify)
-    }
-
-    /// Whether the operator signed in successfully from `address` within `within`.
-    pub async fn signed_in_from_recently(
-        &self,
-        address: &str,
-        within: Duration,
-    ) -> Result<bool, DbError> {
-        sqlx::query_scalar(
-            "SELECT EXISTS (SELECT 1 FROM operator_audit
-                            WHERE action = 'operator.sign_in' AND address = $1
-                              AND at > now() - $2 * interval '1 second')",
-        )
-        .bind(address)
-        .bind(f64::from(
-            u32::try_from(within.as_secs()).unwrap_or(u32::MAX),
-        ))
-        .fetch_one(&self.pool)
         .await
         .map_err(classify)
     }

@@ -666,3 +666,63 @@ async fn a_restart_seeds_only_in_window_sign_ins_under_the_current_credential() 
     );
     db.drop_database().await;
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "needs the stack: scripts/stack.sh up (run by scripts/drills.sh)"]
+async fn a_rotated_credential_ends_the_sessions_it_issued() {
+    // F1: a session is bound to the credential that issued it — rotating the
+    // password hash ends the sessions the rotated-out hash created. Before
+    // credential_fp the check knew only the digest: a stolen cookie kept full
+    // access across a rotation until absolute expiry. Red today on the same
+    // assert: the row is still live, the check finds it, 200.
+    let db = TestDb::create(1).await;
+    let fixture = ProviderFixture::start(Mode::Ok).await;
+    let hash_a = hash();
+    let hash_b = hash();
+    assert_ne!(
+        hash_a, hash_b,
+        "argon2's random salt must give the rotation drill two credentials"
+    );
+    let mut env = drill_env(&db, &fixture.url);
+    env.retain(|(k, _)| k != "INTENT_COOKIE_SECURE");
+    env.push(("INTENT_OPERATOR_PASSWORD_HASH".into(), hash_a));
+    env.push(("INTENT_TRUSTED_PROXIES".into(), "127.0.0.1".into()));
+    let mut server = Server::start(env).await;
+    let client = client();
+    let cookie = sign_in(&client, &server.base, PASSWORD, "10.84.0.1", "req-f1").await;
+    assert_eq!(cookie.status(), 200);
+    let cookie = cookie
+        .headers()
+        .get("set-cookie")
+        .unwrap()
+        .to_str()
+        .unwrap()
+        .split(';')
+        .next()
+        .unwrap()
+        .to_owned();
+
+    // Rotation = a boot carrying a different hash: the same session row is still
+    // in the table, and the new process must not count it.
+    server.kill();
+    let mut env = drill_env(&db, &fixture.url);
+    env.retain(|(k, _)| k != "INTENT_COOKIE_SECURE");
+    env.push(("INTENT_OPERATOR_PASSWORD_HASH".into(), hash_b));
+    env.push(("INTENT_TRUSTED_PROXIES".into(), "127.0.0.1".into()));
+    let server2 = Server::start(env).await;
+    let out = client
+        .get(format!("{}/v1/operator/session", server2.base))
+        .header("cookie", &cookie)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(
+        out.status(),
+        401,
+        "a session issued under the rotated-out credential answered after rotation"
+    );
+    // Control: the password still signs in — the session ended, not the operator.
+    let fresh = sign_in(&client, &server2.base, PASSWORD, "10.84.0.1", "req-f1-new").await;
+    assert_eq!(fresh.status(), 200);
+    db.drop_database().await;
+}

@@ -80,6 +80,10 @@ pub struct Inner {
     /// Drill-injected clock offset on `now_ms` (K): zero unless `INTENT_TEST_CLOCK`
     /// mounted `POST /__test/clock`.
     clock_skew_ms: std::sync::atomic::AtomicU64,
+    /// Which credential issued sessions and known addresses (F1, D-069): sessions
+    /// and sign-ins under a rotated-out hash stop counting the moment this value
+    /// changes. `None` when no operator password is configured.
+    pub operator_credential_fp: Option<String>,
 }
 
 /// What the studio's untrusted-input routes need. Built at startup by [`crate::serve`].
@@ -110,6 +114,10 @@ impl App {
         health: Health,
         studio: Studio,
     ) -> Self {
+        let operator_credential_fp = config
+            .operator_password_hash
+            .as_ref()
+            .map(crate::operator::credential_fingerprint);
         Self(Arc::new(Inner {
             gate: Arc::new(Semaphore::new(config.max_in_flight)),
             address_limiter: Limiter::new(config.address_quota, config.rate_table_entries),
@@ -123,6 +131,7 @@ impl App {
             studio,
             started: Instant::now(),
             clock_skew_ms: std::sync::atomic::AtomicU64::new(0),
+            operator_credential_fp,
             config,
             db,
             sessions,

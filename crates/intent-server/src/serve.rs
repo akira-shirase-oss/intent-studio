@@ -172,13 +172,13 @@ fn signout_db(config: &Config) -> anyhow::Result<Db> {
 /// The in-memory session state the audit table still knows: the addresses the
 /// known window still covers. Runs before `mark_ready` so the first request sees
 /// the restored state (N10).
-async fn restore_session_memory(config: &Config, app: &App) {
+async fn restore_session_memory(app: &App) {
     // Addresses that produced a session inside the known window keep their day
     // budget through a deploy — an empty set after every restart is the D-052
     // lockout again. Only sign-ins under the CURRENT credential seed the set:
     // after a rotation, a thief's last sign-in under the old password earns the
     // address no day budget — the trade-off a rotation buys (D-069).
-    let Some(hash) = &config.operator_password_hash else {
+    let Some(fp) = &app.operator_credential_fp else {
         tracing::info!("no operator credential configured — known sign-in addresses not seeded");
         return;
     };
@@ -186,7 +186,7 @@ async fn restore_session_memory(config: &Config, app: &App) {
         .sessions
         .recent_signer_addresses(
             Duration::from_millis(crate::operator::KNOWN_ADDRESS_WINDOW_MS),
-            &crate::operator::credential_fingerprint(hash),
+            fp,
         )
         .await
     {
@@ -281,7 +281,7 @@ pub async fn run(config: Config) -> anyhow::Result<ShutdownOutcome> {
 
     let app_connections = app.connections.clone();
     let router = app::router(app.clone());
-    restore_session_memory(&config, &app).await;
+    restore_session_memory(&app).await;
     let address = listener.local_addr().context("reading the bound address")?;
     tracing::info!(%address, "listening");
     health.mark_ready();
