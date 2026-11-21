@@ -54,6 +54,29 @@ jobs:
         if: failure()
         run: docker compose -p intent-studio -f deploy/compose.yaml logs --no-color --tail 200
 
+  # The drills get their own job so a unit-test failure can never hide a drill's red —
+  # the session decode bug (N15) shipped exactly that way. This job runs the same
+  # scripts/drills.sh check.sh would, against the real stack, independently.
+  drills:
+    name: drills (scripts/drills.sh)
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Install the pinned toolchain
+        run: |
+          channel=$(sed -n 's/^channel = "\(.*\)"$/\1/p' rust-toolchain.toml)
+          rustup toolchain install "$channel" --profile minimal --component clippy,rustfmt
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+      - name: Keep outgoing ports below the stack's
+        run: sudo sysctl -w net.ipv4.ip_local_port_range="20000 50999"
+      - run: scripts/drills.sh
+      - name: Stack logs
+        if: failure()
+        run: docker compose -p intent-studio -f deploy/compose.yaml logs --no-color --tail 200
+
   supply-chain:
     name: supply chain (cargo-deny)
     runs-on: ubuntu-latest

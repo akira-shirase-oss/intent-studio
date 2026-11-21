@@ -32,7 +32,8 @@ if rustup target list --installed 2>/dev/null | grep -qx "x86_64-unknown-linux-g
 fi
 
 step tests
-cargo test --workspace --locked
+# --no-fail-fast: a red unit test must never hide what the other suites would have shown.
+cargo test --workspace --locked --no-fail-fast
 
 step architecture
 scripts/check-architecture.sh
@@ -71,7 +72,7 @@ step "mutation seams absent from the shipped binary"
 # INTENT_MUTATION and its seams exist only under the `mutation-seams` cargo feature — a
 # default release build must carry no trace of them (the enum, the parse, the seam names).
 cargo build --release --locked -p intent-server
-if strings target/release/intent-server | grep -qE 'INTENT_MUTATION|mutation-seams|no-session-check|no-session-delete|trust-any-forwarded|no-metrics-token|no-request-bound|no-content-type|no-egress-guard|no-lead-dedup'; then
+if strings target/release/intent-server | grep -qE 'INTENT_MUTATION|mutation-seams|no-session-check|no-session-delete|trust-any-forwarded|no-metrics-token|no-request-bound|no-content-type|no-egress-guard|no-lead-dedup|client-session-token'; then
     echo "the shipped binary carries a mutation seam — the feature leaked into a default build" >&2
     exit 1
 fi
