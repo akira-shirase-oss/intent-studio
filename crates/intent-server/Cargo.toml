@@ -44,6 +44,13 @@ uuid = { workspace = true, features = ["v4", "v7"] }
 [target.'cfg(target_os = "linux")'.dependencies]
 rustix = { version = "1.1.6", features = ["process"] }
 
+[[bin]]
+# The hostile child the browser-confinement proofs run — exists only under the
+# feature so a shipped tree never carries it.
+name = "browser_probe"
+path = "src/bin/browser_probe.rs"
+required-features = ["mutation-seams"]
+
 [dev-dependencies]
 # Test fixtures only (an image to upload); the server itself never links a decoder (A6).
 image.workspace = true

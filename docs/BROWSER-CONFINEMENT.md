@@ -11,10 +11,12 @@ the asset worker's profile is unchanged.
 
 - **No network at all** — not "no external hosts": a fresh network namespace has
   no route, no DNS, no socket to anything but (up-configured) loopback.
-- **No filesystem beyond a read-only bundle dir and a private tmpfs** — the mount
-  namespace binds the bundle read-only over itself and mounts a fresh tmpfs on
-  `/tmp`; nothing else in the job's view is writable, and no path outside the
-  bundle is needed.
+- **No filesystem beyond a read-only bundle dir and a private tmpfs** — inside
+  the mount+user namespaces a jail root is built on a tmpfs: the bundle and the
+  system trees the browser links against (`/usr`, `/lib*`, `/bin`, `/sbin`)
+  bound read-only, then `pivot_root` and a lazy unmount of the old root, so no
+  other host path exists at all. A mount namespace alone is *not* enough — it
+  still exposes the whole host tree; the pivot is what removes it.
 - **No access to the database, Valkey, or the server's secrets** — follows from
   no-network + `env_clear` (no `DATABASE_URL`, no credentials, no proxy vars).
 - **Bounded CPU, memory, wall time, and output** — `RLIMIT_CPU`/`RLIMIT_AS`/

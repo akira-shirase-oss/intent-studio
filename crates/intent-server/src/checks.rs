@@ -183,3 +183,39 @@ fn worker_error(refusal: WorkerRefusal) -> CheckError {
 fn db_error(error: &DbError) -> CheckError {
     CheckError::Db(error.summary())
 }
+
+/// The confinement profile a browser job runs under (docs/BROWSER-CONFINEMENT.md):
+/// every bound and wall on, every hole off — unless `INTENT_MUTATION` armed one,
+/// which is exactly what the confinement proofs exercise. Browser binaries are
+/// still absent, so the six D-022 checks stay `Pending`; this builder exists so
+/// the profile — and its seams — are real code the proofs run, not prose.
+#[allow(
+    unused_mut,
+    clippy::needless_update,
+    reason = "in a shipped build no seam exists, so the job stays as constructed"
+)]
+pub fn browser_job(
+    config: &Config,
+    program: &str,
+    args: &[String],
+    bundle_dir: &std::path::Path,
+) -> intent_render::browser::BrowserJob {
+    let mut job = intent_render::browser::BrowserJob {
+        program: program.to_owned(),
+        args: args.to_vec(),
+        bundle_dir: bundle_dir.to_path_buf(),
+        ..Default::default()
+    };
+    #[cfg(feature = "mutation-seams")]
+    {
+        use crate::config::Mutation;
+        job.allow_net = crate::mutated!(config, Mutation::BrowserAllowNet);
+        job.host_mounts = crate::mutated!(config, Mutation::BrowserHostMounts);
+        job.unbounded_procs = crate::mutated!(config, Mutation::BrowserUnboundedProcs);
+        job.unbounded_mem = crate::mutated!(config, Mutation::BrowserUnboundedMem);
+        job.no_deadline = crate::mutated!(config, Mutation::BrowserNoDeadline);
+        job.unbounded_output = crate::mutated!(config, Mutation::BrowserUnboundedOutput);
+    }
+    let _ = config;
+    job
+}

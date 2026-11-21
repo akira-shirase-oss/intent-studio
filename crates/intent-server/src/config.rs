@@ -92,6 +92,18 @@ pub enum Mutation {
     /// The check runner drops the `no_inline_svg` result before the verdict —
     /// a bundle that should fail is recorded as merely incomplete.
     AllowInlineSvg,
+    /// The browser job is spawned with no network namespace (BROWSER-CONFINEMENT).
+    BrowserAllowNet,
+    /// The browser job sees the host filesystem — no private mount namespace.
+    BrowserHostMounts,
+    /// The browser job's process count is unbounded (a fork bomb runs free).
+    BrowserUnboundedProcs,
+    /// The browser job's address space is unbounded (a memory bomb runs free).
+    BrowserUnboundedMem,
+    /// The browser job's deadline never fires (a hung page runs forever).
+    BrowserNoDeadline,
+    /// The browser job's output is unbounded.
+    BrowserUnboundedOutput,
 }
 
 /// Which notification provider adapter to use.
@@ -376,9 +388,15 @@ impl Config {
             Some("client-session-token") => Some(Mutation::ClientSessionToken),
             Some("check-any-hash") => Some(Mutation::CheckAnyHash),
             Some("allow-inline-svg") => Some(Mutation::AllowInlineSvg),
+            Some("browser-allow-net") => Some(Mutation::BrowserAllowNet),
+            Some("browser-host-mounts") => Some(Mutation::BrowserHostMounts),
+            Some("browser-unbounded-procs") => Some(Mutation::BrowserUnboundedProcs),
+            Some("browser-unbounded-mem") => Some(Mutation::BrowserUnboundedMem),
+            Some("browser-no-deadline") => Some(Mutation::BrowserNoDeadline),
+            Some("browser-unbounded-output") => Some(Mutation::BrowserUnboundedOutput),
             Some(other) => {
                 env.problems.push(format!(
-                    "INTENT_MUTATION: expected one of no-session-check, no-session-delete, trust-any-forwarded, no-metrics-token, no-request-bound, no-content-type, no-egress-guard, no-lead-dedup, client-session-token, check-any-hash, allow-inline-svg; got {other:?}"
+                    "INTENT_MUTATION: expected one of no-session-check, no-session-delete, trust-any-forwarded, no-metrics-token, no-request-bound, no-content-type, no-egress-guard, no-lead-dedup, client-session-token, check-any-hash, allow-inline-svg, browser-allow-net, browser-host-mounts, browser-unbounded-procs, browser-unbounded-mem, browser-no-deadline, browser-unbounded-output; got {other:?}"
                 ));
                 None
             }

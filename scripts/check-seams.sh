@@ -29,6 +29,12 @@ needles=(
     client-session-token
     check-any-hash
     allow-inline-svg
+    browser-allow-net
+    browser-host-mounts
+    browser-unbounded-procs
+    browser-unbounded-mem
+    browser-no-deadline
+    browser-unbounded-output
     INTENT_TEST_CLOCK
     __test/clock
     advance_ms

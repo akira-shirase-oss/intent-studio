@@ -22,6 +22,8 @@ use tokio::{
     sync::Semaphore,
 };
 
+pub mod browser;
+
 /// Largest input a job takes (10 MiB).
 pub const MAX_INPUT_BYTES: usize = 10 * 1024 * 1024;
 /// Largest output a job may produce (a re-encoded image can outgrow its input).
