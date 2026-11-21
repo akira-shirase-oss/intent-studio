@@ -45,7 +45,7 @@ async fn confined(
     hole(&mut job);
     // Inside the jail the bundle is /bundle; under the host-mounts hole the
     // job sees the host path instead — the same program either way.
-    if job.host_mounts {
+    if job.holes.host_mounts {
         job.program = probe.to_string_lossy().into_owned();
     }
     tweak(&mut job);
@@ -62,7 +62,7 @@ async fn a_browser_job_has_no_network() {
         !String::from_utf8_lossy(&out).contains("GOT-NET"),
         "a confined job reached a TCP socket"
     );
-    let armed = confined(&["net"], |j| j.allow_net = true, |_| {}).await;
+    let armed = confined(&["net"], |j| j.holes.allow_net = true, |_| {}).await;
     assert!(
         armed
             .as_ref()
@@ -81,7 +81,7 @@ async fn a_browser_job_sees_only_its_bundle() {
         !String::from_utf8_lossy(&out).contains("GOT-READ"),
         "a confined job read a host path"
     );
-    let armed = confined(&["read"], |j| j.host_mounts = true, |_| {}).await;
+    let armed = confined(&["read"], |j| j.holes.host_mounts = true, |_| {}).await;
     assert!(
         armed
             .as_ref()
@@ -102,7 +102,7 @@ async fn a_browser_job_cannot_fork_bomb() {
         .parse()
         .unwrap_or(u32::MAX);
     assert!(n < 512, "a confined job spawned {n} processes");
-    let armed = confined(&["fork"], |j| j.unbounded_procs = true, |_| {}).await;
+    let armed = confined(&["fork"], |j| j.holes.unbounded_procs = true, |_| {}).await;
     assert!(
         armed
             .as_ref()
@@ -126,7 +126,7 @@ async fn a_browser_job_cannot_memory_bomb() {
         matches!(guarded, Err(BrowserRefusal::Crashed)),
         "a confined job reached its memory target: {guarded:?}"
     );
-    let armed = confined(&["mem", "2048"], |j| j.unbounded_mem = true, |_| {}).await;
+    let armed = confined(&["mem", "2048"], |j| j.holes.unbounded_mem = true, |_| {}).await;
     assert!(
         armed
             .as_ref()
@@ -156,7 +156,7 @@ async fn a_browser_job_dies_on_its_deadline() {
         Duration::from_secs(4),
         confined(
             &["hang"],
-            |j| j.no_deadline = true,
+            |j| j.holes.no_deadline = true,
             |j| {
                 j.deadline = Duration::from_secs(2);
             },
@@ -189,7 +189,7 @@ async fn a_browser_job_is_cut_at_its_output_bound() {
     // kills it.
     let armed = confined(
         &["big"],
-        |j| j.unbounded_output = true,
+        |j| j.holes.unbounded_output = true,
         |j| {
             j.deadline = Duration::from_secs(3);
         },

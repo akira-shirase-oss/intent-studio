@@ -30,6 +30,15 @@ use crate::{
 /// The builder's version, recorded on the candidate (`baseline@2`).
 pub const BUILDER: &str = "baseline@2";
 
+/// The policy the emitted meta carries — the only CSP a page may claim (the
+/// contract requires this exact content value, so a hostile bundle cannot
+/// weaken it: a second meta can only ever restrict further).
+pub const CSP: &str =
+    "default-src 'none'; img-src 'self'; style-src 'self'; base-uri 'none'; form-action 'self'";
+
+/// The viewport the emitted meta carries.
+pub const VIEWPORT: &str = "width=device-width,initial-scale=1";
+
 /// Every page's fixed first bytes (I2-1): the meta CSP is part of the emitted
 /// document, so the check can require this exact prologue rather than trust a
 /// policy a hostile bundle rewrote. The stylesheet is a bundle file — inline
@@ -76,11 +85,14 @@ pub enum BuildError {
     Bundle(#[from] crate::bundle::BundleError),
 }
 
-/// Builds a [`ValidatedTree`] into a bundle with `facts` resolved on `today`.
-/// Validation is a type, not a convention — a tree that skipped it cannot
-/// reach this function. The builder still refuses a fact it cannot use — it is
-/// the last enforcement point before bytes.
-pub fn build(tree: &ValidatedTree, facts: &FactLookup, today: Date) -> Result<Bundle, BuildError> {
+/// Builds a [`ValidatedTree`] into a bundle. Validation is a type, not a
+/// convention — a tree that skipped it cannot reach this function, and the
+/// facts and date it was validated against travel inside it, so a tree can
+/// never be approved under one fact set and built under another. The builder
+/// still refuses a fact it cannot use — it is the last enforcement point
+/// before bytes.
+pub fn build(tree: &ValidatedTree) -> Result<Bundle, BuildError> {
+    let (facts, today) = (tree.facts(), tree.today());
     let mut bundle = Bundle::new();
     bundle.put(STYLE_PATH, STYLE.as_bytes().to_vec())?;
     let mut pages: Vec<(&String, &Page)> = tree.tree().pages.iter().map(|p| (&p.path, p)).collect();
@@ -515,8 +527,8 @@ mod tests {
     #[test]
     fn the_same_input_builds_byte_identical_bundles() {
         let facts = lookup(vec![]);
-        let a = build(&vtree(tree(), &facts), &facts, day()).unwrap();
-        let b = build(&vtree(tree(), &facts), &facts, day()).unwrap();
+        let a = build(&vtree(tree(), &facts)).unwrap();
+        let b = build(&vtree(tree(), &facts)).unwrap();
         assert_eq!(a.encode(), b.encode());
         assert_eq!(a.hash(), b.hash());
         // Every page carries the fixed prologue — the check's byte-for-byte bar.
@@ -572,7 +584,7 @@ mod tests {
             "Fixed it <fast> & well",
         )]);
         let brief = brief(&[id]);
-        let bundle = build(&vtree_with(t, &facts, &brief), &facts, day()).unwrap();
+        let bundle = build(&vtree_with(t, &facts, &brief)).unwrap();
         let html = String::from_utf8(bundle.files()["index.html"].clone()).unwrap();
         assert!(html.contains("<blockquote>Fixed it &lt;fast&gt; &amp; well</blockquote>"));
         assert!(
@@ -631,7 +643,7 @@ mod tests {
             facts: vec![],
         });
         let facts = lookup(vec![]);
-        let bundle = build(&vtree(t, &facts), &facts, day()).unwrap();
+        let bundle = build(&vtree(t, &facts)).unwrap();
         let html = String::from_utf8(bundle.files()["index.html"].clone()).unwrap();
         assert!(html.contains("O&#x27;Malley &amp; Sons &quot;Plumbing&quot;"));
     }

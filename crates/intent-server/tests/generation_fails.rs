@@ -119,7 +119,7 @@ fn brief_value() -> intent_domain::brief::Brief {
 
 async fn brief_and_candidate(
     db: &Db,
-    tree: &PageTree,
+    vt: &intent_domain::page_tree::ValidatedTree,
     bundle_sha256: ContentHash,
 ) -> intent_db::CandidateRow {
     let today = time::OffsetDateTime::now_utc().date();
@@ -136,7 +136,7 @@ async fn brief_and_candidate(
             id: Uuid::now_v7(),
             tenant: DEMO,
             brief: brief_id,
-            tree: &serde_json::to_value(tree).unwrap(),
+            tree: vt.tree(),
             bundle_sha256,
             builder: baseline::BUILDER,
             model: None,
@@ -167,9 +167,8 @@ fn vtree() -> intent_domain::page_tree::ValidatedTree {
 /// Builds the baseline and puts its blob in `store` — the path every candidate
 /// takes: the same tree gives the same bytes, proved byte-for-byte.
 async fn baseline_bundle(store: &ContentStore) -> (Bundle, ContentHash) {
-    let today = time::OffsetDateTime::now_utc().date();
-    let bundle = baseline::build(&vtree(), &FactLookup::new(), today).unwrap();
-    let again = baseline::build(&vtree(), &FactLookup::new(), today).unwrap();
+    let bundle = baseline::build(&vtree()).unwrap();
+    let again = baseline::build(&vtree()).unwrap();
     assert_eq!(
         bundle.encode(),
         again.encode(),
@@ -191,7 +190,7 @@ async fn a_clean_bundle_is_pending_until_the_browser_backend_lands() {
     let db = Db::connect_lazy(&test.url, PoolLimits::default()).unwrap();
     let store = store();
     let (_, hash) = baseline_bundle(&store).await;
-    let candidate = brief_and_candidate(&db, &tree(), hash).await;
+    let candidate = brief_and_candidate(&db, &vtree(), hash).await;
 
     let outcome = checks::run(
         &config(None),
@@ -207,7 +206,7 @@ async fn a_clean_bundle_is_pending_until_the_browser_backend_lands() {
     // Honest: the statics passed, the six browser checks could not run — and
     // `pending` is what the record says, never `pass`.
     assert_eq!(outcome, SuiteOutcome::Pending);
-    let records = db.check_records(candidate.id).await.unwrap();
+    let records = db.check_records(DEMO, candidate.id).await.unwrap();
     assert_eq!(records.len(), 1);
     assert_eq!(records[0].verdict, "pending");
     assert_eq!(records[0].bundle_sha256, candidate.bundle_sha256);
@@ -226,6 +225,18 @@ async fn a_clean_bundle_is_pending_until_the_browser_backend_lands() {
         .filter(|r| r.status == CheckStatus::Pending)
         .count();
     assert_eq!(pending, 6, "the six browser checks stay honestly pending");
+    // N6: the candidate id alone never reads evidence — another tenant's
+    // handle gets an empty page, not the row.
+    assert!(
+        db.check_records(
+            intent_domain::ids::TenantId::from_uuid(Uuid::now_v7()),
+            candidate.id,
+        )
+        .await
+        .unwrap()
+        .is_empty(),
+        "a check record read without the tenant scope must see nothing"
+    );
     test.drop_database().await;
 }
 
@@ -235,8 +246,7 @@ async fn inline_svg_is_checks_failed_and_the_record_names_it() {
     let test = TestDb::create(1).await;
     let db = Db::connect_lazy(&test.url, PoolLimits::default()).unwrap();
     let store = store();
-    let today = time::OffsetDateTime::now_utc().date();
-    let mut bundle = baseline::build(&vtree(), &FactLookup::new(), today).unwrap();
+    let mut bundle = baseline::build(&vtree()).unwrap();
     // What a hostile or buggy generator would ship: the check must catch it in
     // the bytes, not trust that the builder never would. The page carries the
     // fixed prologue so `no_inline_svg` itself — not the contract's prologue
@@ -255,7 +265,7 @@ async fn inline_svg_is_checks_failed_and_the_record_names_it() {
         )
         .unwrap();
     let hash = store.put(bundle.encode()).await.unwrap();
-    let candidate = brief_and_candidate(&db, &tree(), hash).await;
+    let candidate = brief_and_candidate(&db, &vtree(), hash).await;
 
     let outcome = checks::run(
         &config(None),
@@ -269,7 +279,7 @@ async fn inline_svg_is_checks_failed_and_the_record_names_it() {
     .await
     .unwrap();
     assert_eq!(outcome, SuiteOutcome::ChecksFailed);
-    let records = db.check_records(candidate.id).await.unwrap();
+    let records = db.check_records(DEMO, candidate.id).await.unwrap();
     assert_eq!(records[0].verdict, "fail");
     let results: Vec<intent_domain::checks::CheckResult> =
         serde_json::from_value(records[0].results.clone()).unwrap();
@@ -288,7 +298,7 @@ async fn a_worker_that_dies_is_render_crashed_and_writes_nothing() {
     let db = Db::connect_lazy(&test.url, PoolLimits::default()).unwrap();
     let store = store();
     let (_, hash) = baseline_bundle(&store).await;
-    let candidate = brief_and_candidate(&db, &tree(), hash).await;
+    let candidate = brief_and_candidate(&db, &vtree(), hash).await;
     // A worker that exits immediately — every job is a crash.
     let dead = Driver::new(PathBuf::from("/usr/bin/false"), Duration::from_secs(5), 1);
     let error = checks::run(&config(None), &db, &store, &dead, DEMO, candidate.id, None)
@@ -299,7 +309,10 @@ async fn a_worker_that_dies_is_render_crashed_and_writes_nothing() {
         "expected render_crashed, got {error}"
     );
     assert!(
-        db.check_records(candidate.id).await.unwrap().is_empty(),
+        db.check_records(DEMO, candidate.id)
+            .await
+            .unwrap()
+            .is_empty(),
         "a crashed run records nothing"
     );
     test.drop_database().await;
@@ -313,11 +326,10 @@ async fn a_check_record_cannot_describe_a_different_hash() {
     let store = store();
     let (_, hash_a) = baseline_bundle(&store).await;
     // A second candidate over different bytes: the wrong-hash temptation.
-    let today = time::OffsetDateTime::now_utc().date();
-    let mut other = baseline::build(&vtree(), &FactLookup::new(), today).unwrap();
+    let mut other = baseline::build(&vtree()).unwrap();
     other.put("index.html", b"different".to_vec()).unwrap();
     let hash_b = store.put(other.encode()).await.unwrap();
-    let candidate = brief_and_candidate(&db, &tree(), hash_a).await;
+    let candidate = brief_and_candidate(&db, &vtree(), hash_a).await;
 
     // The write layer itself: a record for candidate A naming B's bundle is
     // refused by the pair foreign key, whatever asked for it. Real results —
@@ -331,7 +343,13 @@ async fn a_check_record_cannot_describe_a_different_hash() {
                 suite: intent_domain::checks::SUITE,
                 engine: "static",
                 viewport: "static",
-                results: &json!([{ "check": "no_inline_svg", "status": "pass" }]),
+                results: &json!(intent_domain::checks::CheckKind::ALL.map(|check| {
+                    intent_domain::checks::CheckResult {
+                        check,
+                        status: intent_domain::checks::CheckStatus::Pass,
+                        detail: None,
+                    }
+                })),
             },
             &AUDIT,
         )
@@ -371,7 +389,7 @@ async fn malformed_model_output_is_refused_and_the_previous_version_is_untouched
     let db = Db::connect_lazy(&test.url, PoolLimits::default()).unwrap();
     let store = store();
     let (_, hash_a) = baseline_bundle(&store).await;
-    let candidate = brief_and_candidate(&db, &tree(), hash_a).await;
+    let candidate = brief_and_candidate(&db, &vtree(), hash_a).await;
     checks::run(
         &config(None),
         &db,
@@ -383,7 +401,7 @@ async fn malformed_model_output_is_refused_and_the_previous_version_is_untouched
     )
     .await
     .unwrap();
-    let before = db.check_records(candidate.id).await.unwrap().len();
+    let before = db.check_records(DEMO, candidate.id).await.unwrap().len();
 
     // `model_invalid_output` — bytes that are not a page tree are a parse
     // refusal; a tree that is schema-shaped but unusable is a named refusal.
@@ -414,7 +432,7 @@ async fn malformed_model_output_is_refused_and_the_previous_version_is_untouched
     let stored = store.get(hash_a).await.unwrap().unwrap();
     assert_eq!(ContentHash::of(&stored), hash_a);
     assert_eq!(
-        db.check_records(candidate.id).await.unwrap().len(),
+        db.check_records(DEMO, candidate.id).await.unwrap().len(),
         before,
         "a failed generation touches nothing already recorded"
     );
@@ -428,7 +446,7 @@ async fn a_report_missing_a_check_is_malformed_not_a_record() {
     let db = Db::connect_lazy(&test.url, PoolLimits::default()).unwrap();
     let store = store();
     let (_, hash) = baseline_bundle(&store).await;
-    let candidate = brief_and_candidate(&db, &tree(), hash).await;
+    let candidate = brief_and_candidate(&db, &vtree(), hash).await;
 
     // A worker answering the protocol but omitting checks: the runner treats an
     // incomplete report as malformed — a missing check can never launder a fail.
@@ -457,7 +475,72 @@ async fn a_report_missing_a_check_is_malformed_not_a_record() {
         matches!(error, CheckError::ReportMalformed),
         "an incomplete report must be malformed, got {error}"
     );
-    assert!(db.check_records(candidate.id).await.unwrap().is_empty());
+    assert!(
+        db.check_records(DEMO, candidate.id)
+            .await
+            .unwrap()
+            .is_empty()
+    );
+    test.drop_database().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "needs the stack: scripts/stack.sh up (run by scripts/drills.sh)"]
+async fn a_browser_pass_from_the_static_worker_is_malformed() {
+    let test = TestDb::create(1).await;
+    let db = Db::connect_lazy(&test.url, PoolLimits::default()).unwrap();
+    let store = store();
+    let (_, hash) = baseline_bundle(&store).await;
+    let candidate = brief_and_candidate(&db, &vtree(), hash).await;
+
+    // A compromised worker laundering (N7): the confined static worker can
+    // never run a browser check, so a report claiming one passed is malformed
+    // by definition. All eight kinds are present — only the browser-pass
+    // guard can refuse it.
+    let body = serde_json::to_string(&intent_domain::checks::CheckReport {
+        suite: intent_domain::checks::SUITE.to_owned(),
+        results: intent_domain::checks::CheckKind::ALL
+            .map(|check| intent_domain::checks::CheckResult {
+                check,
+                status: intent_domain::checks::CheckStatus::Pass,
+                detail: None,
+            })
+            .to_vec(),
+    })
+    .unwrap();
+    let dir = std::env::temp_dir().join(format!(
+        "intent-fake-worker-{}",
+        uuid::Uuid::now_v7().simple()
+    ));
+    std::fs::create_dir_all(&dir).unwrap();
+    let script = dir.join("fake-check-worker.sh");
+    std::fs::write(
+        &script,
+        format!(
+            "#!/bin/sh\nbody='{body}'\nprintf '{{\"ok\":true,\"media_type\":\"application/json\",\"length\":%d}}\\n%s' \"${{#body}}\" \"$body\"\n"
+        ),
+    )
+    .unwrap();
+    std::fs::set_permissions(
+        &script,
+        <std::fs::Permissions as std::os::unix::fs::PermissionsExt>::from_mode(0o755),
+    )
+    .unwrap();
+    let fake = Driver::new(script, Duration::from_secs(5), 1);
+
+    let error = checks::run(&config(None), &db, &store, &fake, DEMO, candidate.id, None)
+        .await
+        .unwrap_err();
+    assert!(
+        matches!(error, CheckError::ReportMalformed),
+        "a browser pass from the static worker must be malformed, got {error}"
+    );
+    assert!(
+        db.check_records(DEMO, candidate.id)
+            .await
+            .unwrap()
+            .is_empty()
+    );
     test.drop_database().await;
 }
 
@@ -508,8 +591,7 @@ mod seams {
         let test = TestDb::create(1).await;
         let db = Db::connect_lazy(&test.url, PoolLimits::default()).unwrap();
         let store = store();
-        let today = time::OffsetDateTime::now_utc().date();
-        let mut bundle = baseline::build(&vtree(), &FactLookup::new(), today).unwrap();
+        let mut bundle = baseline::build(&vtree()).unwrap();
         let payload = format!(
             "{}{}",
             intent_domain::baseline::PROLOGUE,
@@ -519,7 +601,7 @@ mod seams {
         );
         bundle.put("index.html", payload.into_bytes()).unwrap();
         let hash = store.put(bundle.encode()).await.unwrap();
-        let candidate = brief_and_candidate(&db, &tree(), hash).await;
+        let candidate = brief_and_candidate(&db, &vtree(), hash).await;
 
         let error = checks::run(
             &config(Some("allow-inline-svg")),
@@ -536,7 +618,12 @@ mod seams {
             matches!(error, CheckError::ReportMalformed),
             "a dropped check result must be malformed, got {error}"
         );
-        assert!(db.check_records(candidate.id).await.unwrap().is_empty());
+        assert!(
+            db.check_records(DEMO, candidate.id)
+                .await
+                .unwrap()
+                .is_empty()
+        );
         test.drop_database().await;
     }
 
@@ -550,11 +637,10 @@ mod seams {
         let db = Db::connect_lazy(&test.url, PoolLimits::default()).unwrap();
         let store = store();
         let (_, hash_a) = baseline_bundle(&store).await;
-        let today = time::OffsetDateTime::now_utc().date();
-        let mut other = baseline::build(&vtree(), &FactLookup::new(), today).unwrap();
+        let mut other = baseline::build(&vtree()).unwrap();
         other.put("index.html", b"other".to_vec()).unwrap();
         let hash_b = store.put(other.encode()).await.unwrap();
-        let candidate = brief_and_candidate(&db, &tree(), hash_a).await;
+        let candidate = brief_and_candidate(&db, &vtree(), hash_a).await;
 
         let error = checks::run(
             &config(Some("check-any-hash")),
@@ -571,7 +657,12 @@ mod seams {
             matches!(error, CheckError::CheckBinding),
             "the wrong-hash write must be refused by the binding, got {error}"
         );
-        assert!(db.check_records(candidate.id).await.unwrap().is_empty());
+        assert!(
+            db.check_records(DEMO, candidate.id)
+                .await
+                .unwrap()
+                .is_empty()
+        );
         test.drop_database().await;
     }
 }

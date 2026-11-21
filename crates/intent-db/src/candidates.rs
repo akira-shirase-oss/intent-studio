@@ -11,6 +11,7 @@
 use intent_domain::{
     content::ContentHash,
     ids::{BriefId, TenantId},
+    page_tree::PageTree,
 };
 use sqlx::Row as _;
 use time::OffsetDateTime;
@@ -52,8 +53,9 @@ pub struct NewCandidate<'a> {
     pub tenant: TenantId,
     /// The brief it was generated for.
     pub brief: BriefId,
-    /// The validated page tree.
-    pub tree: &'a serde_json::Value,
+    /// The validated page tree — `vt.tree()`, not an arbitrary JSON value:
+    /// the provenance hash names the exact tree validation minted (N6).
+    pub tree: &'a PageTree,
     /// The bundle's hash.
     pub bundle_sha256: ContentHash,
     /// `baseline@1` or the generation job's builder version.
@@ -155,10 +157,13 @@ impl Db {
         audit: &AuditEntry<'_>,
     ) -> Result<Option<CandidateRow>, DbError> {
         // The tree hash is derived, never supplied — the provenance column
-        // names the exact bytes the approval binds (D-010).
+        // names the exact bytes the approval binds (D-010); the input is the
+        // typed tree itself, so a divergent serialization cannot reach it.
         let tree_bytes = serde_json::to_vec(new.tree)
             .map_err(|_| DbError::Other(sqlx::Error::Protocol("tree not json".into())))?;
         let tree_hash = ContentHash::of(&tree_bytes);
+        let tree_json = serde_json::to_value(new.tree)
+            .map_err(|_| DbError::Other(sqlx::Error::Protocol("tree not json".into())))?;
         let mut tx = self.pool.begin().await.map_err(classify)?;
         let row = sqlx::query(
             "INSERT INTO candidates
@@ -175,7 +180,7 @@ impl Db {
         .bind(new.brief.as_uuid())
         .bind(new.bundle_sha256.as_bytes().as_slice())
         .bind(tree_hash.as_bytes().as_slice())
-        .bind(new.tree)
+        .bind(tree_json)
         .bind(intent_domain::page_tree::COMPONENT_SET)
         .bind(new.builder)
         .bind(new.model)
@@ -226,12 +231,20 @@ impl Db {
                     "results not a check-results array".into(),
                 ))
             })?;
-        if results.is_empty() {
+        // The suite's full check set, each exactly once, every detail inside
+        // its bound (N5): a record that omits or repeats a check is not
+        // evidence — it is a hole a favourable subset could slip through. The
+        // domain's own completeness rule decides; the verdict it yields is
+        // the only one the row may carry.
+        let report = intent_domain::checks::CheckReport {
+            suite: new.suite.to_owned(),
+            results,
+        };
+        let Some(verdict) = intent_domain::checks::CheckVerdict::of(&report) else {
             return Err(DbError::Other(sqlx::Error::Protocol(
-                "results empty".into(),
+                "incomplete check results".into(),
             )));
-        }
-        let verdict = intent_domain::checks::CheckVerdict::of_results(&results);
+        };
         // The tenant is selected from the candidate, never supplied — a record
         // can only ever land under its candidate's own scope (I2-7).
         let mut tx = self.pool.begin().await.map_err(classify)?;
@@ -261,15 +274,21 @@ impl Db {
         Ok(row)
     }
 
-    /// A candidate's check records, newest first.
-    pub async fn check_records(&self, candidate_id: Uuid) -> Result<Vec<CheckRecordRow>, DbError> {
+    /// A candidate's check records, newest first — tenant-scoped (N6): the
+    /// candidate id alone is never enough to read evidence.
+    pub async fn check_records(
+        &self,
+        tenant: TenantId,
+        candidate_id: Uuid,
+    ) -> Result<Vec<CheckRecordRow>, DbError> {
         let rows = sqlx::query(
             "SELECT id, candidate_id, tenant_id, bundle_sha256, suite, engine, viewport,
                     results, verdict, ran_at
              FROM check_records
-             WHERE candidate_id = $1 ORDER BY ran_at DESC, id DESC",
+             WHERE candidate_id = $1 AND tenant_id = $2 ORDER BY ran_at DESC, id DESC",
         )
         .bind(candidate_id)
+        .bind(tenant.as_uuid())
         .fetch_all(&self.pool)
         .await
         .map_err(classify)?;

@@ -37,12 +37,12 @@ fn config_with(mutation: Option<&str>) -> Config {
 
 fn flags(job: &BrowserJob) -> [bool; 6] {
     [
-        job.allow_net,
-        job.host_mounts,
-        job.unbounded_procs,
-        job.unbounded_mem,
-        job.no_deadline,
-        job.unbounded_output,
+        job.holes.allow_net,
+        job.holes.host_mounts,
+        job.holes.unbounded_procs,
+        job.holes.unbounded_mem,
+        job.holes.no_deadline,
+        job.holes.unbounded_output,
     ]
 }
 

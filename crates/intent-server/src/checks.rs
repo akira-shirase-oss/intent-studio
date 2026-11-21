@@ -216,12 +216,12 @@ pub fn browser_job(
     #[cfg(feature = "mutation-seams")]
     {
         use crate::config::Mutation;
-        job.allow_net = crate::mutated!(config, Mutation::BrowserAllowNet);
-        job.host_mounts = crate::mutated!(config, Mutation::BrowserHostMounts);
-        job.unbounded_procs = crate::mutated!(config, Mutation::BrowserUnboundedProcs);
-        job.unbounded_mem = crate::mutated!(config, Mutation::BrowserUnboundedMem);
-        job.no_deadline = crate::mutated!(config, Mutation::BrowserNoDeadline);
-        job.unbounded_output = crate::mutated!(config, Mutation::BrowserUnboundedOutput);
+        job.holes.allow_net = crate::mutated!(config, Mutation::BrowserAllowNet);
+        job.holes.host_mounts = crate::mutated!(config, Mutation::BrowserHostMounts);
+        job.holes.unbounded_procs = crate::mutated!(config, Mutation::BrowserUnboundedProcs);
+        job.holes.unbounded_mem = crate::mutated!(config, Mutation::BrowserUnboundedMem);
+        job.holes.no_deadline = crate::mutated!(config, Mutation::BrowserNoDeadline);
+        job.holes.unbounded_output = crate::mutated!(config, Mutation::BrowserUnboundedOutput);
     }
     let _ = config;
     job

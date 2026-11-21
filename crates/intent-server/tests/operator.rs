@@ -769,3 +769,63 @@ async fn a_rotated_credential_ends_the_sessions_it_issued() {
     );
     db.drop_database().await;
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "needs the stack: scripts/stack.sh up (run by scripts/drills.sh)"]
+async fn a_fingerprintless_boot_never_sweeps_sessions() {
+    // N7: the boot sweep compares every session row's fingerprint with the
+    // configured one. With no fingerprint there is nothing to compare — the
+    // sweep must skip, so a session outlives a fingerprintless boot and still
+    // answers when the credential returns. Were the sweep to run anyway, its
+    // `IS DISTINCT FROM` against a null fingerprint would wipe every row.
+    let db = TestDb::create(1).await;
+    let fixture = ProviderFixture::start(Mode::Ok).await;
+    let hash_a = hash();
+    let mut env = drill_env(&db, &fixture.url);
+    env.retain(|(k, _)| k != "INTENT_COOKIE_SECURE");
+    env.push(("INTENT_OPERATOR_PASSWORD_HASH".into(), hash_a.clone()));
+    env.push(("INTENT_TRUSTED_PROXIES".into(), "127.0.0.1".into()));
+    let mut server = Server::start(env).await;
+    let client = client();
+    let cookie = sign_in(&client, &server.base, PASSWORD, "10.85.0.1", "req-n7").await;
+    assert_eq!(cookie.status(), 200);
+    let cookie = cookie
+        .headers()
+        .get("set-cookie")
+        .unwrap()
+        .to_str()
+        .unwrap()
+        .split(';')
+        .next()
+        .unwrap()
+        .to_owned();
+
+    // The gap: a development boot with NO credential at all. Its boot alone is
+    // what matters — the sweep either ran and judged nothing, or was skipped.
+    server.kill();
+    let mut env = drill_env(&db, &fixture.url);
+    env.retain(|(k, _)| k != "INTENT_COOKIE_SECURE");
+    env.push(("INTENT_TRUSTED_PROXIES".into(), "127.0.0.1".into()));
+    let mut server_none = Server::start(env).await;
+    server_none.kill();
+
+    // The credential returns: the session row must still be there to answer —
+    // the fingerprintless boot can only have skipped the sweep.
+    let mut env = drill_env(&db, &fixture.url);
+    env.retain(|(k, _)| k != "INTENT_COOKIE_SECURE");
+    env.push(("INTENT_OPERATOR_PASSWORD_HASH".into(), hash_a));
+    env.push(("INTENT_TRUSTED_PROXIES".into(), "127.0.0.1".into()));
+    let server_back = Server::start(env).await;
+    let still = client
+        .get(format!("{}/v1/operator/session", server_back.base))
+        .header("cookie", &cookie)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(
+        still.status(),
+        200,
+        "a fingerprintless boot swept the session it could not judge"
+    );
+    db.drop_database().await;
+}

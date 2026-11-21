@@ -416,10 +416,16 @@ fn visit_section<'a>(section: &'a Section, visit: &mut dyn FnMut(Slot<'a>)) {
 
 /// A tree [`validate`] approved with zero problems — the only form a builder
 /// may consume, so an unacceptable link target is unbuildable, not escaped
-/// into bytes (I2-2). The field is private: nothing outside this module can
-/// mint one.
+/// into bytes (I2-2). The fields are private: nothing outside this module can
+/// mint one. The facts and date it was validated *against* travel with it —
+/// a tree cannot be approved under one fact set and built under another (I2
+/// re-review, N8), and provenance hashing names this exact value (N6).
 #[derive(Debug, Clone)]
-pub struct ValidatedTree(PageTree);
+pub struct ValidatedTree {
+    tree: PageTree,
+    facts: FactLookup,
+    today: Date,
+}
 
 impl ValidatedTree {
     /// The only constructor: `tree` under `ctx`, problem-free. The problems
@@ -427,7 +433,11 @@ impl ValidatedTree {
     pub fn validate(tree: PageTree, ctx: SpecContext<'_>) -> Result<Self, Vec<Problem>> {
         let problems = validate(&tree, ctx);
         if problems.is_empty() {
-            Ok(Self(tree))
+            Ok(Self {
+                tree,
+                facts: ctx.facts.clone(),
+                today: ctx.today,
+            })
         } else {
             Err(problems)
         }
@@ -435,13 +445,23 @@ impl ValidatedTree {
 
     /// The approved tree.
     pub fn tree(&self) -> &PageTree {
-        &self.0
+        &self.tree
+    }
+
+    /// The fact set the tree was approved under.
+    pub fn facts(&self) -> &FactLookup {
+        &self.facts
+    }
+
+    /// The day it was approved on.
+    pub fn today(&self) -> Date {
+        self.today
     }
 
     /// Unwraps back to the raw tree — for callers that record it, never for
     /// building around the guarantee.
     pub fn into_tree(self) -> PageTree {
-        self.0
+        self.tree
     }
 }
 

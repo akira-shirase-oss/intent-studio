@@ -31,10 +31,6 @@ pub enum BrowserRefusal {
 /// each names the attack class its guard defeats, each is `false` in any real
 /// build, and only `INTENT_MUTATION` under `mutation-seams` can set one.
 #[derive(Debug, Clone)]
-#[expect(
-    clippy::struct_excessive_bools,
-    reason = "the seam bag maps one flag per attack class, by design"
-)]
 pub struct BrowserJob {
     /// The program to run inside the confinement (a browser, or the probe).
     pub program: String,
@@ -54,6 +50,23 @@ pub struct BrowserJob {
     pub max_file_bytes: u64,
     /// Bytes of stdout the driver will read before cutting the job off.
     pub max_output_bytes: u64,
+    /// The armed holes — a field a shipped build cannot even name: the flags
+    /// exist only under `mutation-seams`, so no code path outside the proofs
+    /// can carry one (N7 of the browser-confinement review).
+    #[cfg(feature = "mutation-seams")]
+    pub holes: BrowserHoles,
+}
+
+/// The six mutation holes — one per wall [`run`] must hold (the drill table).
+/// Exists only under `mutation-seams`; every accessor below answers `false`
+/// for a flag a shipped build does not have.
+#[cfg(feature = "mutation-seams")]
+#[derive(Debug, Clone, Default)]
+#[expect(
+    clippy::struct_excessive_bools,
+    reason = "the seam bag maps one flag per attack class, by design"
+)]
+pub struct BrowserHoles {
     /// `browser-allow-net`: no network namespace.
     pub allow_net: bool,
     /// `browser-host-mounts`: no private mount namespace — the host filesystem.
@@ -80,13 +93,61 @@ impl Default for BrowserJob {
             max_procs: 128,
             max_file_bytes: 32 << 20,
             max_output_bytes: 4 << 20,
-            allow_net: false,
-            host_mounts: false,
-            unbounded_procs: false,
-            unbounded_mem: false,
-            no_deadline: false,
-            unbounded_output: false,
+            #[cfg(feature = "mutation-seams")]
+            holes: BrowserHoles::default(),
         }
+    }
+}
+
+/// The hole accessors — the only way [`run`] and [`confined_command`] read a
+/// flag. In a shipped build each answer is the constant `false` a missing
+/// field cannot lie about. Linux-only like their callers.
+#[cfg(target_os = "linux")]
+#[allow(
+    clippy::unused_self,
+    reason = "a shipped build's flag is the constant false — self exists only for the seam bag"
+)]
+impl BrowserJob {
+    fn allow_net(&self) -> bool {
+        #[cfg(feature = "mutation-seams")]
+        return self.holes.allow_net;
+        #[cfg(not(feature = "mutation-seams"))]
+        return false;
+    }
+
+    fn host_mounts(&self) -> bool {
+        #[cfg(feature = "mutation-seams")]
+        return self.holes.host_mounts;
+        #[cfg(not(feature = "mutation-seams"))]
+        return false;
+    }
+
+    fn unbounded_procs(&self) -> bool {
+        #[cfg(feature = "mutation-seams")]
+        return self.holes.unbounded_procs;
+        #[cfg(not(feature = "mutation-seams"))]
+        return false;
+    }
+
+    fn unbounded_mem(&self) -> bool {
+        #[cfg(feature = "mutation-seams")]
+        return self.holes.unbounded_mem;
+        #[cfg(not(feature = "mutation-seams"))]
+        return false;
+    }
+
+    fn no_deadline(&self) -> bool {
+        #[cfg(feature = "mutation-seams")]
+        return self.holes.no_deadline;
+        #[cfg(not(feature = "mutation-seams"))]
+        return false;
+    }
+
+    fn unbounded_output(&self) -> bool {
+        #[cfg(feature = "mutation-seams")]
+        return self.holes.unbounded_output;
+        #[cfg(not(feature = "mutation-seams"))]
+        return false;
     }
 }
 
@@ -104,14 +165,14 @@ fn confined_command(job: &BrowserJob) -> tokio::process::Command {
     use tokio::process::Command;
 
     let mut flags: Vec<&str> = vec!["--user", "--map-current-user"];
-    if !job.allow_net {
+    if !job.allow_net() {
         flags.push("--net");
     }
-    if !job.host_mounts {
+    if !job.host_mounts() {
         flags.push("--mount");
     }
     flags.extend(["--ipc", "--pid", "--fork", "--kill-child"]);
-    let inner = if job.host_mounts {
+    let inner = if job.host_mounts() {
         "cd \"$1\"; prog=\"$2\"; shift 2; exec \"$prog\" \"$@\"".to_owned()
     } else {
         concat!(
@@ -131,12 +192,12 @@ fn confined_command(job: &BrowserJob) -> tokio::process::Command {
     let limits = format!(
         "ulimit -t {cpu};{as_} ulimit -u {procs};ulimit -f {files};",
         cpu = job.cpu_secs,
-        as_ = if job.unbounded_mem {
+        as_ = if job.unbounded_mem() {
             String::new()
         } else {
             format!("ulimit -v {};", job.mem_bytes / 1024)
         },
-        procs = if job.unbounded_procs {
+        procs = if job.unbounded_procs() {
             "unlimited".to_owned()
         } else {
             job.max_procs.to_string()
@@ -173,12 +234,12 @@ pub async fn run(job: &BrowserJob) -> Result<Vec<u8>, BrowserRefusal> {
     use tokio::io::AsyncReadExt;
 
     let (out_cap, deadline_on) = (
-        if job.unbounded_output {
+        if job.unbounded_output() {
             u64::MAX
         } else {
             job.max_output_bytes + 1
         },
-        !job.no_deadline,
+        !job.no_deadline(),
     );
     let mut child = confined_command(job)
         .spawn()
@@ -188,7 +249,7 @@ pub async fn run(job: &BrowserJob) -> Result<Vec<u8>, BrowserRefusal> {
         let mut out = Vec::new();
         let read = stdout.take(out_cap).read_to_end(&mut out).await;
         match read {
-            Ok(_) if !job.unbounded_output && out.len() as u64 > job.max_output_bytes => {
+            Ok(_) if !job.unbounded_output() && out.len() as u64 > job.max_output_bytes => {
                 kill_tree(&mut child).await;
                 Err(BrowserRefusal::TooLarge)
             }

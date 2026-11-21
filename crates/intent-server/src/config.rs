@@ -839,6 +839,25 @@ mod tests {
     }
 
     #[test]
+    fn a_fingerprintless_boot_is_refused_outside_development() {
+        // No credential → nothing to sign in under, no fingerprint the boot
+        // sweep could compare — outside development that must never reach
+        // ready (N7).
+        let mut pairs = MINIMAL.to_vec();
+        pairs.retain(|(k, _)| *k != "INTENT_PROFILE");
+        pairs.push(("INTENT_PROFILE", "production"));
+        pairs.push(("INTENT_SESSION_IDLE_SECS", "1800"));
+        let text = config(&pairs).unwrap_err().to_string();
+        assert!(
+            text.contains("INTENT_OPERATOR_PASSWORD_HASH"),
+            "a fingerprintless production boot must refuse, got {text}"
+        );
+        // Development may boot without one — the sweep simply has nothing to
+        // judge and skips (proved at the stack in operator.rs).
+        assert!(config(&MINIMAL).is_ok());
+    }
+
+    #[test]
     fn one_address_gets_at_most_a_quarter_of_a_small_cap() {
         let per_address = |cap: &str| {
             let mut pairs = MINIMAL.to_vec();
