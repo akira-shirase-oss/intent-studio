@@ -14,10 +14,13 @@
 //! bytes and never decides access.
 
 use std::{
-    fs, io,
+    collections::HashSet,
+    fs,
+    future::Future,
+    io,
     io::Write as _,
     path::{Path, PathBuf},
-    sync::Arc,
+    sync::{Arc, LazyLock, Mutex, MutexGuard},
     time::Duration,
 };
 
@@ -29,14 +32,19 @@ pub const DEFAULT_MAX_BLOB_BYTES: usize = 32 * 1024 * 1024;
 /// Longest any one store operation may take before the caller gives up on it.
 pub const OPERATION_DEADLINE: Duration = Duration::from_secs(10);
 
-/// How long `open` waits for a held root lock before refusing, and how often it retries.
-/// A forked child inherits the lock's descriptor — a duplicate on the same open file
-/// description — and keeps the lock alive until its exec drops it (`O_CLOEXEC`), so a
-/// store dropped while a child is spawning can look held for a few milliseconds. The
-/// grace absorbs that transient; a live holder still refuses, just after the grace.
-const LOCK_GRACE: Duration = Duration::from_millis(500);
-/// The delay between lock retries.
-const LOCK_POLL: Duration = Duration::from_millis(5);
+/// Roots this process holds open. A POSIX record lock is per-process — it cannot
+/// conflict with a second lock by the same process — so the same-process half of
+/// "a root is single-store" lives here. `open` claims the key before opening
+/// `lock`; that ordering is also what keeps the POSIX close footgun away: any
+/// close by this process of a descriptor on that inode drops all of this
+/// process's locks on it, so a live store's descriptor must be the only one.
+static OPEN_ROOTS: LazyLock<Mutex<HashSet<PathBuf>>> = LazyLock::new(|| Mutex::new(HashSet::new()));
+
+fn open_roots() -> MutexGuard<'static, HashSet<PathBuf>> {
+    OPEN_ROOTS
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+}
 
 /// Why a store operation failed. Messages carry no bytes and no full hash.
 #[derive(Debug, thiserror::Error)]
@@ -64,24 +72,83 @@ pub enum StoreError {
 /// The store.
 #[derive(Debug, Clone)]
 pub struct ContentStore {
+    inner: Arc<Inner>,
+}
+
+/// What every clone of a store shares — and what actually owns the root.
+#[derive(Debug)]
+struct Inner {
     root: PathBuf,
     max_blob: usize,
-    /// The root's exclusive lock, held (never read) so long as any clone of this store
-    /// lives.
-    #[allow(dead_code, reason = "the file is held for its lock, not read")]
-    lock: Arc<fs::File>,
+    /// The descriptor the record lock lives against. Held (never read) so long
+    /// as any clone lives; `Option` so `Drop` can order close-before-unregister.
+    /// No other descriptor may ever be opened or duplicated on this file: a
+    /// close on any of this process's descriptors on the inode drops all of
+    /// this process's record locks on it.
+    lock: Option<fs::File>,
+    /// The canonical root, the `OPEN_ROOTS` key.
+    key: PathBuf,
+}
+
+impl Drop for Inner {
+    fn drop(&mut self) {
+        // Close first, then unregister. Reversed would let a racing `open`
+        // claim the root, take the same-process record lock, then lose it
+        // silently when this descriptor's close releases the inode's locks.
+        drop(self.lock.take());
+        open_roots().remove(&self.key);
+    }
+}
+
+/// Removes the registry claim on drop unless `disarm` hands it to a store —
+/// the error paths in `open` must not leave a root claimed.
+struct Claim(PathBuf);
+
+impl Claim {
+    fn disarm(self) -> PathBuf {
+        let key = self.0.clone();
+        std::mem::forget(self);
+        key
+    }
+}
+
+impl Drop for Claim {
+    fn drop(&mut self) {
+        open_roots().remove(&self.0);
+    }
+}
+
+/// Where a blob lives.
+fn blob_path(root: &Path, hash: &ContentHash) -> PathBuf {
+    let hex = hash.to_string();
+    root.join("sha256")
+        .join(&hex[0..2])
+        .join(&hex[2..4])
+        .join(hex)
 }
 
 impl ContentStore {
     /// Opens (creating if needed) a store at `root`, takes its exclusive lock, sweeps crash
     /// orphans from `tmp/`, and proves the store is writable by writing and removing a probe
-    /// file. A root is single-store: the lock is held for the store's life and released by
-    /// the OS however the process ends, so a second `open` on a held root fails with
-    /// [`StoreError::Locked`] before it can touch the live holder's in-flight writes.
-    /// Blocking: call at startup, not from a request.
+    /// file. A root is single-store, across processes and within this one:
+    ///
+    /// - Cross-process, `<root>/lock` carries a POSIX `fcntl` record lock. Record locks are
+    ///   per-process — unlike `flock`/OFD locks they are *not* inherited by a forked child —
+    ///   and they die with the process, so a crash or kill always frees the root.
+    /// - Same-process, `OPEN_ROOTS` refuses a second `open` before it touches the file —
+    ///   necessary because a same-process record lock cannot conflict, and closing any other
+    ///   descriptor on that inode would silently drop the live lock.
+    ///
+    /// The lock is held for the store's life and released deterministically when the last
+    /// clone drops. Blocking: call at startup, not from a request.
     pub fn open(root: impl Into<PathBuf>, max_blob: usize) -> Result<Self, StoreError> {
         let root = root.into();
         fs::create_dir_all(&root).map_err(StoreError::Io)?;
+        let key = fs::canonicalize(&root).map_err(StoreError::Io)?;
+        if !open_roots().insert(key.clone()) {
+            return Err(StoreError::Locked);
+        }
+        let claimed = Claim(key);
         let lock = fs::OpenOptions::new()
             .read(true)
             .write(true)
@@ -89,17 +156,17 @@ impl ContentStore {
             .truncate(false)
             .open(root.join("lock"))
             .map_err(StoreError::Io)?;
-        let mut attempts = LOCK_GRACE.as_millis() / LOCK_POLL.as_millis();
-        loop {
-            match lock.try_lock() {
-                Ok(()) => break,
-                Err(fs::TryLockError::WouldBlock) if attempts > 0 => {
-                    attempts -= 1;
-                    std::thread::sleep(LOCK_POLL);
-                }
-                Err(fs::TryLockError::WouldBlock) => return Err(StoreError::Locked),
-                Err(fs::TryLockError::Error(error)) => return Err(StoreError::Io(error)),
+        match rustix::fs::fcntl_lock(&lock, rustix::fs::FlockOperation::NonBlockingLockExclusive) {
+            Ok(()) => {}
+            Err(error)
+                if matches!(
+                    error.kind(),
+                    io::ErrorKind::PermissionDenied | io::ErrorKind::WouldBlock
+                ) =>
+            {
+                return Err(StoreError::Locked);
             }
+            Err(error) => return Err(StoreError::Io(error.into())),
         }
         fs::create_dir_all(root.join("sha256")).map_err(StoreError::Io)?;
         let tmp = root.join("tmp");
@@ -119,92 +186,123 @@ impl ContentStore {
         fs::write(&probe, b"probe").map_err(StoreError::Io)?;
         fs::remove_file(&probe).map_err(StoreError::Io)?;
         Ok(Self {
-            root,
-            max_blob,
-            lock: Arc::new(lock),
+            inner: Arc::new(Inner {
+                root,
+                max_blob,
+                lock: Some(lock),
+                key: claimed.disarm(),
+            }),
         })
     }
 
     /// The root directory.
     pub fn root(&self) -> &Path {
-        &self.root
+        &self.inner.root
     }
 
-    /// Where a blob lives.
+    /// Where a blob lives (the tests poke the file directly).
+    #[cfg(test)]
     fn path_of(&self, hash: &ContentHash) -> PathBuf {
-        let hex = hash.to_string();
-        self.root
-            .join("sha256")
-            .join(&hex[0..2])
-            .join(&hex[2..4])
-            .join(hex)
+        blob_path(&self.inner.root, hash)
     }
 
     /// Stores `bytes` and returns their hash.
     pub async fn put(&self, bytes: Vec<u8>) -> Result<ContentHash, StoreError> {
-        if bytes.len() > self.max_blob {
-            return Err(StoreError::TooLarge { max: self.max_blob });
+        if bytes.len() > self.inner.max_blob {
+            return Err(StoreError::TooLarge {
+                max: self.inner.max_blob,
+            });
         }
-        let store = self.clone();
-        run_blocking(move || store.put_blocking(&bytes)).await
+        self.put_task(bytes).await
     }
 
-    fn put_blocking(&self, bytes: &[u8]) -> Result<ContentHash, StoreError> {
-        let hash = ContentHash::of(bytes);
-        let target = self.path_of(&hash);
-        // The idempotent-write fast path skips the write only while the stored bytes still
-        // verify: a torn or damaged file with the same length is rewritten below, never
-        // trusted by its name and length.
-        if let Ok(meta) = fs::metadata(&target)
-            && meta.len() == bytes.len() as u64
-            && fs::read(&target).is_ok_and(|stored| ContentHash::of(&stored) == hash)
-        {
-            return Ok(hash);
-        }
-        let dir = target
-            .parent()
-            .unwrap_or_else(|| unreachable!("invariant: a blob path has a parent"));
-        fs::create_dir_all(dir).map_err(StoreError::Io)?;
-        let temp = self
-            .root
-            .join("tmp")
-            .join(uuid::Uuid::new_v4().simple().to_string());
-        let written = (|| {
-            let mut file = fs::OpenOptions::new()
-                .write(true)
-                .create_new(true)
-                .open(&temp)?;
-            file.write_all(bytes)?;
-            file.sync_all()?;
-            fs::rename(&temp, &target)?;
-            fs::File::open(dir)?.sync_all()
-        })();
-        if let Err(error) = written {
-            let _ = fs::remove_file(&temp);
-            return Err(StoreError::Io(error));
-        }
-        Ok(hash)
+    /// The blocking half of `put` as a `'static` future: it carries the root and
+    /// cap only, never the lock, so an operation that outlives the deadline (a
+    /// wedged blocking task cannot be cancelled) holds nothing the root needs.
+    fn put_task(
+        &self,
+        bytes: Vec<u8>,
+    ) -> impl Future<Output = Result<ContentHash, StoreError>> + Send + 'static {
+        let root = self.inner.root.clone();
+        async move { run_blocking(move || put_blocking(&root, &bytes)).await }
     }
 
     /// The blob's bytes, verified against its hash; `None` when it is not stored.
     pub async fn get(&self, hash: ContentHash) -> Result<Option<Vec<u8>>, StoreError> {
-        let path = self.path_of(&hash);
-        let max = self.max_blob;
-        run_blocking(move || {
-            let bytes = match fs::metadata(&path) {
-                Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
-                Err(error) => return Err(StoreError::Io(error)),
-                Ok(meta) if meta.len() > max as u64 => return Err(StoreError::Corrupt),
-                Ok(_) => fs::read(&path).map_err(StoreError::Io)?,
-            };
-            if ContentHash::of(&bytes) == hash {
-                Ok(Some(bytes))
-            } else {
-                Err(StoreError::Corrupt)
-            }
-        })
-        .await
+        self.get_task(hash).await
     }
+
+    fn get_task(
+        &self,
+        hash: ContentHash,
+    ) -> impl Future<Output = Result<Option<Vec<u8>>, StoreError>> + Send + 'static {
+        let path = blob_path(&self.inner.root, &hash);
+        let max = self.inner.max_blob;
+        async move {
+            run_blocking(move || {
+                let bytes = match fs::metadata(&path) {
+                    Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
+                    Err(error) => return Err(StoreError::Io(error)),
+                    Ok(meta) if meta.len() > max as u64 => return Err(StoreError::Corrupt),
+                    Ok(_) => fs::read(&path).map_err(StoreError::Io)?,
+                };
+                if ContentHash::of(&bytes) == hash {
+                    Ok(Some(bytes))
+                } else {
+                    Err(StoreError::Corrupt)
+                }
+            })
+            .await
+        }
+    }
+}
+
+fn put_blocking(root: &Path, bytes: &[u8]) -> Result<ContentHash, StoreError> {
+    #[cfg(test)]
+    {
+        let gate = PUT_GATE
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .take_if(|(gated, _, _)| gated.as_path() == root)
+            .map(|(_, entered, release)| (entered, release));
+        if let Some((entered, release)) = gate {
+            let _ = entered.send(());
+            let _ = release.recv_timeout(Duration::from_secs(30));
+        }
+    }
+    let hash = ContentHash::of(bytes);
+    let target = blob_path(root, &hash);
+    // The idempotent-write fast path skips the write only while the stored bytes still
+    // verify: a torn or damaged file with the same length is rewritten below, never
+    // trusted by its name and length.
+    if let Ok(meta) = fs::metadata(&target)
+        && meta.len() == bytes.len() as u64
+        && fs::read(&target).is_ok_and(|stored| ContentHash::of(&stored) == hash)
+    {
+        return Ok(hash);
+    }
+    let dir = target
+        .parent()
+        .unwrap_or_else(|| unreachable!("invariant: a blob path has a parent"));
+    fs::create_dir_all(dir).map_err(StoreError::Io)?;
+    let temp = root
+        .join("tmp")
+        .join(uuid::Uuid::new_v4().simple().to_string());
+    let written = (|| {
+        let mut file = fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&temp)?;
+        file.write_all(bytes)?;
+        file.sync_all()?;
+        fs::rename(&temp, &target)?;
+        fs::File::open(dir)?.sync_all()
+    })();
+    if let Err(error) = written {
+        let _ = fs::remove_file(&temp);
+        return Err(StoreError::Io(error));
+    }
+    Ok(hash)
 }
 
 async fn run_blocking<T: Send + 'static>(
@@ -216,6 +314,20 @@ async fn run_blocking<T: Send + 'static>(
         Ok(Ok(result)) => result,
     }
 }
+
+/// The wedged-operation test's rendezvous: the root it applies to (so a parallel
+/// test's `put` cannot steal it), the "inside the operation" sender, and the
+/// "finish now" receiver — channels, not barriers, so the test's fuse can be a
+/// `recv_timeout` rather than a wall-clock sleep.
+#[cfg(test)]
+type PutGate = (
+    PathBuf,
+    std::sync::mpsc::SyncSender<()>,
+    std::sync::mpsc::Receiver<()>,
+);
+
+#[cfg(test)]
+static PUT_GATE: LazyLock<Mutex<Option<PutGate>>> = LazyLock::new(|| Mutex::new(None));
 
 #[cfg(test)]
 mod tests {
@@ -296,21 +408,45 @@ mod tests {
     }
 
     #[test]
-    fn an_inherited_lock_descriptor_clears_within_the_grace() {
-        // A forked child inherits a duplicate of the lock's descriptor on the same open
-        // file description; it keeps the lock until its exec drops the O_CLOEXEC fd.
-        // Simulated with try_clone + a short hold: without the retry, open sees the
-        // inherited hold and refuses outright.
+    fn a_duplicated_lock_descriptor_cannot_hold_the_root() {
+        // fork() and try_clone() both hand out a second descriptor on the same open
+        // file description — under flock() that duplicate kept the lock alive past
+        // drop(store). The record lock is per-process: closing our one descriptor on
+        // `lock` releases it no matter how many duplicates exist.
         let root = temp_root();
         let store = ContentStore::open(&root, 1024).unwrap();
-        let inherited = store.lock.try_clone().unwrap();
+        let duplicate = store.inner.lock.as_ref().unwrap().try_clone().unwrap();
         drop(store);
-        let releaser = std::thread::spawn(move || {
-            std::thread::sleep(Duration::from_millis(50));
-            drop(inherited);
-        });
+        let store2 = ContentStore::open(&root, 1024).unwrap();
+        drop(store2);
+        // And the duplicate's own close cannot pretend to hold or steal anything.
+        drop(duplicate);
         let _store = ContentStore::open(&root, 1024).unwrap();
-        releaser.join().unwrap();
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_wedged_blocking_operation_cannot_hold_the_root() {
+        // An operation that outlives its deadline — a wedged blocking task cannot
+        // be cancelled — carries the root and cap only, so dropping the last
+        // store releases the root even while the operation still runs.
+        let root = temp_root();
+        let store = ContentStore::open(&root, 1024).unwrap();
+        // The gate keys on the store's own root spelling (`inner.root`, uncanonicalized).
+        let (entered_tx, entered_rx) = std::sync::mpsc::sync_channel(0);
+        let (release_tx, release_rx) = std::sync::mpsc::sync_channel(0);
+        *PUT_GATE.lock().unwrap() = Some((root.clone(), entered_tx, release_rx));
+        let task = store.put_task(b"wedged".to_vec());
+        drop(store);
+        let op = tokio::spawn(task);
+        // The operation is provably in flight once it signals from inside the gate.
+        assert!(
+            entered_rx.recv_timeout(Duration::from_secs(10)).is_ok(),
+            "operation never reached the gate"
+        );
+        let _store = ContentStore::open(&root, 1024).unwrap();
+        let _ = release_tx.send(());
+        op.await.unwrap().unwrap();
         fs::remove_dir_all(root).unwrap();
     }
 

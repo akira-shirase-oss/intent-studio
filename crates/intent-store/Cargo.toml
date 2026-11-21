@@ -9,6 +9,7 @@ publish.workspace = true
 
 [dependencies]
 intent-domain.workspace = true
+rustix = { version = "1.1.6", features = ["fs"] }
 thiserror.workspace = true
 tokio.workspace = true
 uuid = { workspace = true, features = ["v4"] }
