@@ -194,6 +194,15 @@ const STAGES: &[&str] = &[
 #[cfg(any(target_os = "linux", test))]
 const MARKER: &str = "JAIL-STAGE ";
 
+/// The map files `--map-root-user` writes inside the outer `unshare` — when
+/// its error names one, the refused stage is `idmap`, not `unshare(user)`.
+#[cfg(any(target_os = "linux", test))]
+const MAP_FILES: [&str; 3] = [
+    "/proc/self/uid_map",
+    "/proc/self/setgroups",
+    "/proc/self/gid_map",
+];
+
 /// Bytes of the job's stderr kept: enough for the marker protocol plus the
 /// shell's error lines, bounded so a payload's own noise cannot grow it.
 #[cfg(target_os = "linux")]
@@ -203,21 +212,35 @@ const STDERR_CAP: u64 = 16 << 10;
 #[cfg(any(target_os = "linux", test))]
 const DETAIL_CAP: usize = 600;
 
-/// The inner script the user-namespace `unshare` execs first: it writes the
-/// id map itself (so a refused map names its own stage instead of hiding in
-/// `unshare`'s message), then runs the second `unshare` for the rest of the
-/// namespaces. `$1` is the host euid, `$2` the host egid, `$3` the jail
-/// script; the remaining parameters pass through to it (`{0}` is the flag
-/// set the caller substituted).
+/// The namespace-launcher flags for the outer `unshare`: the user namespace
+/// plus `--map-root-user`, which performs the id-map step itself —
+/// `uid_map` ("0 euid 1"), then `setgroups` deny, then `gid_map` — in the
+/// order kernels since Ubuntu's hardening require. A child cannot write its
+/// own `setgroups` while its uid is still unmapped (`proc_setgroups_open`
+/// refuses, `EACCES`), and an unprivileged parent cannot write a child's
+/// either: `map_write` requires the *file opener's* creds to hold
+/// `CAP_SYS_ADMIN` over the new namespace, which only the task inside it (or
+/// a setuid helper such as `newuidmap`) has. Letting `unshare` do it keeps
+/// the write order the proven path uses; see docs/BROWSER-CONFINEMENT.md.
+#[cfg(any(target_os = "linux", test))]
+const OUTER_ARGS: [&str; 3] = ["--user", "--map-root-user", "--"];
+
+/// The inner script the user-namespace `unshare` execs first. The id map is
+/// already written — `--map-root-user` did it before the exec — so the
+/// `idmap` stage *verifies* the mapped state in the order the writes happen
+/// (uid root, setgroups denied, gid root): a util-linux variant that maps
+/// less, or a map that vanished, names `idmap` before the second `unshare`
+/// runs. `$1` is the jail script; the remaining parameters pass through to
+/// it (`{0}` is the flag set the caller substituted).
 #[cfg(any(target_os = "linux", test))]
 fn inner_script(inner_flags: &str) -> String {
     format!(
         "echo '{MARKER}idmap' >&2;\
-         echo deny > /proc/self/setgroups || exit 81;\
-         echo \"0 $1 1\" > /proc/self/uid_map || exit 82;\
-         echo \"0 $2 1\" > /proc/self/gid_map || exit 83;\
+         [ \"$(id -u)\" = 0 ] || {{ echo 'idmap: inner uid is not 0' >&2; exit 81; }};\
+         [ \"$(cat /proc/self/setgroups)\" = deny ] || {{ echo 'idmap: setgroups is not deny' >&2; exit 82; }};\
+         [ \"$(id -g)\" = 0 ] || {{ echo 'idmap: inner gid is not 0' >&2; exit 83; }};\
          echo '{MARKER}unshare(net/mount/ipc/pid)' >&2;\
-         real=$3; shift 3;\
+         real=$1; shift;\
          exec unshare {inner_flags} -- sh -c \"$real\" sh \"$@\""
     )
 }
@@ -298,7 +321,9 @@ fn limits_script(job: &BrowserJob) -> String {
 /// `JAIL-STAGE` marker names the step the kernel refused and the non-marker
 /// lines are its error. No marker at all means the first `unshare` died
 /// before the inner shell could speak — stage `unshare(user)` by
-/// construction. After `exec`, the jail shell speaks only when the exec
+/// construction, or `idmap` when its error names one of the map files
+/// (the outer `unshare` performs those writes itself). After `exec`, the
+/// jail shell speaks only when the exec
 /// itself was refused — the `-x` probe exits 88, the kernel's own refusal
 /// surfaces as the shell's 127; both name `exec`. Any other death past that
 /// marker is the *payload's* — `Crashed`, not a jail refusal. A hostile
@@ -319,6 +344,13 @@ fn jail_failure(stderr: &[u8], code: Option<i32>) -> BrowserRefusal {
             }
         }
     }
+    // The outer `unshare` does the id-map writes itself (`--map-root-user`):
+    // when it dies there, no inner marker exists yet — the default
+    // `unshare(user)` would mislabel an idmap refusal. The proc path in its
+    // error names the step precisely.
+    if stage == "unshare(user)" && MAP_FILES.iter().any(|file| detail.contains(file)) {
+        stage = "idmap";
+    }
     if stage == "exec" && !matches!(code, Some(88 | 127)) {
         return BrowserRefusal::Crashed;
     }
@@ -334,36 +366,21 @@ fn jail_failure(stderr: &[u8], code: Option<i32>) -> BrowserRefusal {
     }
 }
 
-/// Our real uid/gid for the id-map write — `/proc` is the only unsafe-free
-/// source of an id on this platform (the workspace forbids `unsafe`).
-#[cfg(target_os = "linux")]
-fn own_ids() -> Option<(u32, u32)> {
-    let status = std::fs::read_to_string("/proc/self/status").ok()?;
-    let field = |name: &str| {
-        status.lines().find_map(|line| {
-            line.strip_prefix(name)
-                .and_then(|rest| rest.split_whitespace().nth(1))
-                .and_then(|value| value.parse::<u32>().ok())
-        })
-    };
-    Some((field("Uid:")?, field("Gid:")?))
-}
-
 /// The confined spawn, in two stages so a refusal names its step: an outer
-/// `unshare --user` gives a user namespace (inside which the mounts below are
-/// permitted without privilege), the inner shell writes the uid/gid map by
-/// hand, then a second `unshare` adds net (no route, no DNS), mount, ipc and
-/// pid — `--fork --kill-child` keeps the tree inside. The jail script then
+/// `unshare --user --map-root-user` gives a user namespace with the caller's
+/// euid/egid mapped to root (unshare itself performs the `uid_map`, setgroups
+/// deny, `gid_map` writes — in that order — before the exec), then a second
+/// `unshare` adds net (no route, no DNS), mount, ipc and pid —
+/// `--fork --kill-child` keeps the tree inside. The jail script then
 /// mounts a private tmpfs, binds the bundle and system trees read-only,
 /// `pivot_root`s so no host path exists, applies `ulimit` bounds and execs
 /// the payload. Parameters reach the shells only as positional arguments,
 /// never inside their strings.
 #[cfg(target_os = "linux")]
-fn confined_command(job: &BrowserJob) -> Result<tokio::process::Command, BrowserRefusal> {
+fn confined_command(job: &BrowserJob) -> tokio::process::Command {
     use std::process::Stdio;
     use tokio::process::Command;
 
-    let (uid, gid) = own_ids().ok_or(BrowserRefusal::Spawn)?;
     let mut inner_flags = String::new();
     if !job.allow_net() {
         inner_flags.push_str("--net ");
@@ -374,13 +391,11 @@ fn confined_command(job: &BrowserJob) -> Result<tokio::process::Command, Browser
     inner_flags.push_str("--ipc --pid --fork --kill-child");
     let limits = limits_script(job);
     let mut cmd = Command::new("unshare");
-    cmd.args(["--user", "--"])
+    cmd.args(OUTER_ARGS)
         .arg("sh")
         .arg("-c")
         .arg(inner_script(&inner_flags))
         .arg("sh")
-        .arg(uid.to_string())
-        .arg(gid.to_string())
         .arg(jail_script(&limits, job.host_mounts()))
         .arg(&job.bundle_dir)
         .arg(&job.program)
@@ -397,7 +412,7 @@ fn confined_command(job: &BrowserJob) -> Result<tokio::process::Command, Browser
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .kill_on_drop(true);
-    Ok(cmd)
+    cmd
 }
 
 /// Runs `job` confined and returns its stdout (Linux).
@@ -418,7 +433,7 @@ pub async fn run(job: &BrowserJob) -> Result<Vec<u8>, BrowserRefusal> {
         },
         !job.no_deadline(),
     );
-    let mut child = confined_command(job)?
+    let mut child = confined_command(job)
         .spawn()
         .map_err(|_| BrowserRefusal::Spawn)?;
     let stdout = child.stdout.take().ok_or(BrowserRefusal::Spawn)?;
@@ -558,17 +573,76 @@ mod tests {
     }
 
     #[test]
-    fn a_refused_map_write_names_the_idmap_stage() {
+    fn a_refused_map_check_names_the_idmap_stage() {
+        // The inner shell verifies the map `--map-root-user` wrote and fails
+        // closed under its own marker.
         let err = refusal(
             "JAIL-STAGE idmap\n\
-             sh: echo: I/O error\n",
+             idmap: setgroups is not deny\n",
             Some(82),
         );
         let BrowserRefusal::JailStart { stage, detail } = err else {
             panic!("expected JailStart, got {err}");
         };
         assert_eq!(stage, "idmap");
-        assert!(detail.contains("I/O error"), "{detail}");
+        assert!(detail.contains("setgroups is not deny"), "{detail}");
+    }
+
+    #[test]
+    fn a_map_refusal_inside_unshare_names_the_idmap_stage() {
+        // `--map-root-user` writes the maps inside the outer `unshare`
+        // itself: a refusal there kills it before the inner shell can emit
+        // a marker. The proc path in its error still names the step.
+        for message in [
+            "unshare: write failed /proc/self/uid_map: Permission denied\n",
+            "unshare: cannot open /proc/self/setgroups: Permission denied\n",
+            "unshare: write failed /proc/self/gid_map: Permission denied\n",
+        ] {
+            let err = refusal(message, Some(1));
+            let BrowserRefusal::JailStart { stage, detail } = err else {
+                panic!("expected JailStart, got {err}");
+            };
+            assert_eq!(stage, "idmap", "{message}");
+            assert!(detail.contains("/proc/self/"), "{detail}");
+        }
+    }
+
+    #[test]
+    fn the_inner_shell_verifies_never_writes_the_map() {
+        // On Ubuntu's hardened kernels `proc_setgroups_open` refuses a task
+        // whose uid is not yet mapped: a self-write of `setgroups` is what
+        // CI run 44899063312 died on. `--map-root-user` is the map writer —
+        // the inner shell may only read the resulting state.
+        let script = inner_script("--ipc --pid");
+        assert!(
+            !script.contains("> /proc/self/"),
+            "the inner shell must never write its own map files: {script}"
+        );
+        // The checks run in the order `--map-root-user` performed them:
+        // uid to root, setgroups denied, gid to root.
+        let positions = ["JAIL-STAGE idmap", "id -u", "setgroups", "id -g"].map(|needle| {
+            script
+                .find(needle)
+                .unwrap_or_else(|| panic!("{needle} missing from {script}"))
+        });
+        assert!(
+            positions.windows(2).all(|pair| pair[0] < pair[1]),
+            "verify uid, setgroups, gid — in write order: {positions:?} in {script}"
+        );
+    }
+
+    #[test]
+    fn the_outer_unshare_maps_the_caller_to_root() {
+        // The map writer of record: `unshare` performs uid_map, setgroups
+        // deny, gid_map in the order kernels since Ubuntu's hardening
+        // require. Neither alternative can replace it — a child self-write
+        // opens `setgroups` with an unmapped uid (`EACCES`), and an
+        // unprivileged parent's write lacks `CAP_SYS_ADMIN` over the new
+        // namespace (only `newuidmap`-style setuid helpers have it).
+        assert_eq!(
+            OUTER_ARGS.as_slice(),
+            ["--user", "--map-root-user", "--"].as_slice()
+        );
     }
 
     #[test]

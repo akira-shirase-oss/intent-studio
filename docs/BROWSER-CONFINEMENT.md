@@ -39,15 +39,58 @@ the asset worker's profile is unchanged.
 | Seccomp | the job gets a **broad** filter (browser syscalls are too many to enumerate); the namespaces + rlimits are the wall | same | same |
 
 The choice: **`unshare(1)` in two stages + shell `ulimit`s + process-group
-kill**. The driver wraps the browser in `unshare --user`; the shell it
-starts writes `setgroups=deny` and the uid/gid map by hand (a refused map
-names its own stage instead of hiding in unshare's message), then execs a
-second `unshare --net --mount --ipc --pid --fork --kill-child`. Inside that,
-a jail shell applies the `ulimit` bounds, mounts a private tmpfs, binds the
-bundle and system trees ro, `pivot_root`s, and `exec`s the browser. No
-unsafe code in the spawn path. A seccomp allowlist is rejected honestly:
-Chromium needs hundreds of syscalls; the namespaces carry the security, the
-rlimits carry the bounds.
+kill**. The driver wraps the browser in `unshare --user --map-root-user`;
+`unshare` itself performs the id-map writes — `uid_map` ("0 euid 1"), then
+`setgroups` deny, then `gid_map` — in the order kernels since Ubuntu's
+hardening require, then execs an inner shell that *verifies* the mapped
+state (the `idmap` stage: inner uid 0, `setgroups` denied, inner gid 0)
+before running a second `unshare --net --mount --ipc --pid --fork
+--kill-child`. Inside that, a jail shell applies the `ulimit` bounds,
+mounts a private tmpfs, binds the bundle and system trees ro, `pivot_root`s,
+and `exec`s the browser. No unsafe code in the spawn path. A seccomp
+allowlist is rejected honestly: Chromium needs hundreds of syscalls; the
+namespaces carry the security, the rlimits carry the bounds.
+
+## The id map: written by `unshare`, verified by the shell
+
+CI run 44899063312 proved a naive self-write cannot do this step: the inner
+shell wrote `deny` to `/proc/self/setgroups` first and the kernel refused it
+(`EACCES` — `proc_setgroups_open` rejects a task whose uid is not yet
+mapped). Three writes are involved and their order is a kernel rule, not a
+convention:
+
+1. `uid_map` — the namespace's own task may self-write the single extent
+   `"0 <euid> 1"` unprivileged (`new_idmap_permitted`'s self-map exception).
+   Once written the task's uid *is* 0 inside the namespace.
+2. `setgroups` deny — required before `gid_map` (since Linux 3.19, an
+   unprivileged `gid_map` write is refused while `USERNS_SETGROUPS_ALLOWED`
+   is set). Opening the file also demands `CAP_SETGID` over the namespace —
+   which the task only satisfies once its uid is mapped, i.e. after step 1.
+3. `gid_map` — the same self-map exception, now permitted because
+   `setgroups` is already `deny`.
+
+`unshare --user --map-root-user` performs exactly this sequence in C before
+the `exec`, which is why it was chosen over the two alternatives:
+
+- **Child self-writes, any order** — what CI 44899063312 ran: `setgroups`
+  first dies at `open` on hardened kernels; and even the corrected order
+  only re-implements by shell what `unshare` already performs in C — the
+  same writes `unshare -Ur` does successfully on these kernels.
+- **Parent writes `/proc/<child>/{setgroups,uid_map,gid_map}` over a sync
+  pipe** — impossible unprivileged: `map_write` additionally requires the
+  *file opener's* credentials to hold `CAP_SYS_ADMIN` over the new
+  namespace, and `proc_setgroups_open` requires `CAP_SETGID` over it or its
+  parent. A regular user's parent process has neither; only setuid helpers
+  (`newuidmap`/`newgidmap`) carry that privilege, which is exactly why they
+  exist. A synchronization pipe cannot grant a capability.
+
+If the map writes inside `unshare` fail, its own error names the file
+(`/proc/self/uid_map`, `setgroups`, `gid_map`), and the classifier reports
+the stage as `idmap`, not `unshare(user)`. The inner shell then re-checks
+the state — `[ "$(id -u)" = 0 ]`, `[ "$(cat /proc/self/setgroups)" = deny
+]`, `[ "$(id -g)" = 0 ]`, in write order — so a util-linux variant that
+maps less than `--map-root-user` promises still names `idmap` and never
+reaches the second `unshare`.
 
 ## A failed jail start names its stage
 
@@ -58,7 +101,9 @@ stderr immediately before each step the kernel may refuse —
 `pivot_root`, `exec` — and the driver's stderr pipe (bounded at 16 KiB)
 keeps the last marker plus the shell's own error lines. A dead job whose
 last marker precedes `exec` returns `BrowserRefusal::JailStart` with the
-stage and a ≤600-byte detail; after `exec`, only the shell's own exec
+stage and a ≤600-byte detail; a refusal inside `unshare`'s own map writes
+(no inner marker yet) still reports `idmap` when its error names a map
+file. After `exec`, only the shell's own exec
 refusals (exit 88/127) still name the stage — any other death is the
 payload's `Crashed`. A hostile payload can forge a marker line and buy a
 mislabelled crash; it cannot buy an open wall.
