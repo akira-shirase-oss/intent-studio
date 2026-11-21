@@ -29,6 +29,15 @@ pub const DEFAULT_MAX_BLOB_BYTES: usize = 32 * 1024 * 1024;
 /// Longest any one store operation may take before the caller gives up on it.
 pub const OPERATION_DEADLINE: Duration = Duration::from_secs(10);
 
+/// How long `open` waits for a held root lock before refusing, and how often it retries.
+/// A forked child inherits the lock's descriptor — a duplicate on the same open file
+/// description — and keeps the lock alive until its exec drops it (`O_CLOEXEC`), so a
+/// store dropped while a child is spawning can look held for a few milliseconds. The
+/// grace absorbs that transient; a live holder still refuses, just after the grace.
+const LOCK_GRACE: Duration = Duration::from_millis(500);
+/// The delay between lock retries.
+const LOCK_POLL: Duration = Duration::from_millis(5);
+
 /// Why a store operation failed. Messages carry no bytes and no full hash.
 #[derive(Debug, thiserror::Error)]
 pub enum StoreError {
@@ -57,8 +66,10 @@ pub enum StoreError {
 pub struct ContentStore {
     root: PathBuf,
     max_blob: usize,
-    /// The root's exclusive lock, held so long as any clone of this store lives.
-    _lock: Arc<fs::File>,
+    /// The root's exclusive lock, held (never read) so long as any clone of this store
+    /// lives.
+    #[allow(dead_code, reason = "the file is held for its lock, not read")]
+    lock: Arc<fs::File>,
 }
 
 impl ContentStore {
@@ -78,10 +89,17 @@ impl ContentStore {
             .truncate(false)
             .open(root.join("lock"))
             .map_err(StoreError::Io)?;
-        match lock.try_lock() {
-            Ok(()) => {}
-            Err(fs::TryLockError::WouldBlock) => return Err(StoreError::Locked),
-            Err(fs::TryLockError::Error(error)) => return Err(StoreError::Io(error)),
+        let mut attempts = LOCK_GRACE.as_millis() / LOCK_POLL.as_millis();
+        loop {
+            match lock.try_lock() {
+                Ok(()) => break,
+                Err(fs::TryLockError::WouldBlock) if attempts > 0 => {
+                    attempts -= 1;
+                    std::thread::sleep(LOCK_POLL);
+                }
+                Err(fs::TryLockError::WouldBlock) => return Err(StoreError::Locked),
+                Err(fs::TryLockError::Error(error)) => return Err(StoreError::Io(error)),
+            }
         }
         fs::create_dir_all(root.join("sha256")).map_err(StoreError::Io)?;
         let tmp = root.join("tmp");
@@ -103,7 +121,7 @@ impl ContentStore {
         Ok(Self {
             root,
             max_blob,
-            _lock: Arc::new(lock),
+            lock: Arc::new(lock),
         })
     }
 
@@ -274,6 +292,25 @@ mod tests {
         fs::write(root.join("tmp").join("orphan"), b"debris").unwrap();
         let _store = ContentStore::open(&root, 1024).unwrap();
         assert_eq!(fs::read_dir(root.join("tmp")).unwrap().count(), 0);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn an_inherited_lock_descriptor_clears_within_the_grace() {
+        // A forked child inherits a duplicate of the lock's descriptor on the same open
+        // file description; it keeps the lock until its exec drops the O_CLOEXEC fd.
+        // Simulated with try_clone + a short hold: without the retry, open sees the
+        // inherited hold and refuses outright.
+        let root = temp_root();
+        let store = ContentStore::open(&root, 1024).unwrap();
+        let inherited = store.lock.try_clone().unwrap();
+        drop(store);
+        let releaser = std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(50));
+            drop(inherited);
+        });
+        let _store = ContentStore::open(&root, 1024).unwrap();
+        releaser.join().unwrap();
         fs::remove_dir_all(root).unwrap();
     }
 
