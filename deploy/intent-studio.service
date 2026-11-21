@@ -39,7 +39,16 @@ ProtectKernelLogs=true
 ProtectControlGroups=true
 ProtectClock=true
 ProtectHostname=true
-RestrictNamespaces=true
+# The browser jail (docs/BROWSER-CONFINEMENT.md) builds its own confinement: a user
+# namespace so the mounts are allowed unprivileged, then net/mount/ipc/pid around
+# the page under test. Permit exactly those five — every other namespace type
+# (uts, cgroup, time) stays refused.
+RestrictNamespaces=user ipc mnt net pid
+# The binaries run under the AppArmor profile granting `userns` (deploy/
+# apparmor.d/intent-jail) — Ubuntu 24.04 refuses unprivileged user namespaces
+# to unprofiled programs, and the jail is all user namespaces. A missing
+# profile fails this unit at start: fail closed, no unconfined browser.
+AppArmorProfile=intent-jail
 RestrictRealtime=true
 RestrictSUIDSGID=true
 LockPersonality=true
@@ -53,6 +62,10 @@ SystemCallArchitectures=native
 # all three; naming prctl and seccomp keeps the allowance if the group ever narrows.
 SystemCallFilter=@system-service prctl seccomp
 SystemCallFilter=~@privileged
+# Back after the deny group: the syscalls the jail needs that @privileged
+# swallows — namespace creation (unshare/setns), the mount/umount the jail
+# root is built from, and pivot_root itself.
+SystemCallFilter=unshare setns mount umount umount2 pivot_root
 UMask=0077
 
 [Install]

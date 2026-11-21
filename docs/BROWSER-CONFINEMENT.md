@@ -12,11 +12,13 @@ the asset worker's profile is unchanged.
 - **No network at all** — not "no external hosts": a fresh network namespace has
   no route, no DNS, no socket to anything but (up-configured) loopback.
 - **No filesystem beyond a read-only bundle dir and a private tmpfs** — inside
-  the mount+user namespaces a jail root is built on a tmpfs: the bundle and the
+  the mount+user namespaces a jail root is built on a tmpfs (mounted at the
+  jail root itself: `pivot_root` requires a mount point): the bundle, the
   system trees the browser links against (`/usr`, `/lib*`, `/bin`, `/sbin`)
-  bound read-only, then `pivot_root` and a lazy unmount of the old root, so no
-  other host path exists at all. A mount namespace alone is *not* enough — it
-  still exposes the whole host tree; the pivot is what removes it.
+  and three device nodes (`/dev/null`, `/dev/zero`, `/dev/urandom`) bound
+  read-only, then `pivot_root` and a lazy unmount of the old root, so no other
+  host path exists at all. A mount namespace alone is *not* enough — it still
+  exposes the whole host tree; the pivot is what removes it.
 - **No access to the database, Valkey, or the server's secrets** — follows from
   no-network + `env_clear` (no `DATABASE_URL`, no credentials, no proxy vars).
 - **Bounded CPU, memory, wall time, and output** — `RLIMIT_CPU`/`RLIMIT_AS`/
@@ -36,13 +38,38 @@ the asset worker's profile is unchanged.
 | Fit | parent applies namespaces *around* the exec'd browser — matches the existing driver shape (spawn, env_clear, rlimits, deadline) | same idea, extra dep | heavyweight: daemon socket is itself a privileged surface |
 | Seccomp | the job gets a **broad** filter (browser syscalls are too many to enumerate); the namespaces + rlimits are the wall | same | same |
 
-The choice: **`unshare(1)` + `pre_exec` rlimits + process-group kill**. The
-driver wraps the browser in `unshare --user --map-current-user --net --mount
---ipc --pid --fork --kill-child`; inside, a shell binds the bundle ro, mounts
-tmpfs `/tmp`, drops into it, and `exec`s the browser. No unsafe code in the
-spawn path beyond `setrlimit`/`setpgid` in `pre_exec`, which the asset driver
-already uses. A seccomp allowlist is rejected honestly: Chromium needs hundreds
-of syscalls; the namespaces carry the security, the rlimits carry the bounds.
+The choice: **`unshare(1)` in two stages + shell `ulimit`s + process-group
+kill**. The driver wraps the browser in `unshare --user`; the shell it
+starts writes `setgroups=deny` and the uid/gid map by hand (a refused map
+names its own stage instead of hiding in unshare's message), then execs a
+second `unshare --net --mount --ipc --pid --fork --kill-child`. Inside that,
+a jail shell applies the `ulimit` bounds, mounts a private tmpfs, binds the
+bundle and system trees ro, `pivot_root`s, and `exec`s the browser. No
+unsafe code in the spawn path. A seccomp allowlist is rejected honestly:
+Chromium needs hundreds of syscalls; the namespaces carry the security, the
+rlimits carry the bounds.
+
+## A failed jail start names its stage
+
+A `Crashed` refusal with no cause is what CI run 44893760525 produced —
+loud, but useless. The inner shells emit a `JAIL-STAGE <name>` line to
+stderr immediately before each step the kernel may refuse —
+`unshare(user)`, `idmap`, `unshare(net/mount/ipc/pid)`, `limits`, `mount`,
+`pivot_root`, `exec` — and the driver's stderr pipe (bounded at 16 KiB)
+keeps the last marker plus the shell's own error lines. A dead job whose
+last marker precedes `exec` returns `BrowserRefusal::JailStart` with the
+stage and a ≤600-byte detail; after `exec`, only the shell's own exec
+refusals (exit 88/127) still name the stage — any other death is the
+payload's `Crashed`. A hostile payload can forge a marker line and buy a
+mislabelled crash; it cannot buy an open wall.
+
+Ubuntu 24.04's `kernel.apparmor_restrict_unprivileged_userns=1` is the
+failure this was built for: it lands at `unshare(user)`. CI relaxes the
+sysctl on its ephemeral runner only; production carries
+`deploy/apparmor.d/intent-jail`, a scoped `userns` grant on the two
+binaries, and the boot self-check (a confined `/bin/true` through the same
+path) refuses to serve before readiness when the jail cannot start —
+fail closed, never an unconfined browser.
 
 ## Talking to the browser without a network
 

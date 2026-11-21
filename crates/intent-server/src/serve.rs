@@ -31,6 +31,46 @@ pub enum ShutdownOutcome {
     DeadlineExceeded,
 }
 
+/// The deploy-time check for the browser jail (fail closed — no unconfined
+/// browser, ever): the confined `/bin/true` probe exercises the exact
+/// namespaces, mounts and `pivot_root` a real browser job gets, before
+/// readiness. A refusal names the stage the kernel denied; under production
+/// the service may not come up without the jail — fix the host
+/// (docs/OPERATOR_GUIDE.md), never weaken it. Development only warns: a
+/// contributor's machine may legitimately lack the profile.
+#[cfg(target_os = "linux")]
+async fn browser_jail_selfcheck(config: &Config) -> anyhow::Result<()> {
+    match intent_render::browser::selfcheck().await {
+        Ok(()) => {
+            tracing::info!("browser confinement jail verified");
+            Ok(())
+        }
+        Err(e) if config.profile == crate::config::Profile::Production => {
+            anyhow::bail!(
+                "browser confinement jail cannot start ({e}); refusing to serve — \
+                 install the AppArmor profile from deploy/apparmor.d/ \
+                 (docs/OPERATOR_GUIDE.md, \"Browser jail\")"
+            );
+        }
+        Err(e) => {
+            tracing::warn!(
+                "browser confinement jail cannot start ({e}); browser checks would be unbuildable here"
+            );
+            Ok(())
+        }
+    }
+}
+
+/// No jail exists off Linux — nothing to verify (the browser suite is CI's).
+#[cfg(not(target_os = "linux"))]
+#[expect(
+    clippy::unused_async,
+    reason = "the signature must match the Linux self-check"
+)]
+async fn browser_jail_selfcheck(_config: &Config) -> anyhow::Result<()> {
+    Ok(())
+}
+
 /// Builds the configured provider adapter.
 pub fn provider(config: &NotifyConfig) -> anyhow::Result<Provider> {
     Ok(match &config.provider {
@@ -299,6 +339,7 @@ pub async fn run(config: Config) -> anyhow::Result<ShutdownOutcome> {
     let app_connections = app.connections.clone();
     let router = app::router(app.clone());
     restore_session_memory(&app).await;
+    browser_jail_selfcheck(&config).await?;
     let address = listener.local_addr().context("reading the bound address")?;
     tracing::info!(%address, "listening");
     health.mark_ready();

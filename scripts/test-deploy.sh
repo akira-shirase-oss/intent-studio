@@ -51,11 +51,28 @@ package="$(scripts/package.sh "$scratch/dist")"
 tar -C "$scratch" -xzf "$package"
 prefix="$scratch/intent-studio"
 for file in bin/intent-server bin/intent-worker workspace/200.html deploy/intent-studio.service \
-    deploy/intent-studio.env.example deploy/Caddyfile OPERATOR_GUIDE.md; do
+    deploy/intent-studio.env.example deploy/Caddyfile deploy/apparmor.d/intent-jail \
+    OPERATOR_GUIDE.md; do
     [ -e "$prefix/$file" ] || fail "the package has no $file"
 done
 cargo build --release --locked -p intent-provider-fixture >&2
 fixture_bin="$(cargo metadata --format-version 1 --no-deps --locked | jq -r .target_directory)/release/intent-provider-fixture"
+
+# The jail self-check in `serve` fails closed under Ubuntu 24.04's
+# kernel.apparmor_restrict_unprivileged_userns=1 unless the binary carries the
+# scoped grant. That is the production path, so it is what this test runs:
+# install and load deploy/apparmor.d/intent-jail (this also proves the shipped
+# profile parses), then run the servers under it via aa-exec. Never the sysctl.
+jail_wrap=()
+if [ "$(uname -s)" = Linux ] \
+    && [ "$(sysctl -n kernel.apparmor_restrict_unprivileged_userns 2>/dev/null || echo 0)" = 1 ]; then
+    sudo install -m 0644 deploy/apparmor.d/intent-jail /etc/apparmor.d/intent-jail
+    sudo apparmor_parser -r /etc/apparmor.d/intent-jail \
+        || fail "apparmor_parser rejected deploy/apparmor.d/intent-jail"
+    command -v aa-exec >/dev/null \
+        || fail "aa-exec is missing: cannot run serve under the jail profile"
+    jail_wrap=(aa-exec -p intent-jail --)
+fi
 
 step "configuration from the env example"
 psql -d intent -c "DROP DATABASE IF EXISTS $db WITH (FORCE)" -c "CREATE DATABASE $db"
@@ -90,7 +107,7 @@ for _ in $(seq 1 100); do curl -sf "http://127.0.0.1:$fixture_port/control/stats
 curl -sf "http://127.0.0.1:$fixture_port/control/stats" >/dev/null || fail "the webhook fixture did not start"
 # Started directly (not through `run`): `$!` must be the server itself, so the cleanup and the
 # SIGTERM below reach it.
-(set -a; . "$env_file"; set +a; exec "$prefix/bin/intent-server" serve) >"$scratch/server.log" 2>&1 &
+(set -a; . "$env_file"; set +a; exec ${jail_wrap[@]+"${jail_wrap[@]}"} "$prefix/bin/intent-server" serve) >"$scratch/server.log" 2>&1 &
 server=$!
 pids+=("$server")
 for _ in $(seq 1 100); do curl -sf "http://127.0.0.1:$port/readyz" >/dev/null && break; sleep 0.1; done
@@ -134,7 +151,7 @@ tar -C "$scratch/restored" -xzf "$scratch/store.tgz"
 restored_env="$scratch/restored.env"
 sed -e "s|59432/$db|59432/$restore_db|" -e "s|^INTENT_BIND=.*|INTENT_BIND=127.0.0.1:$restore_port|" \
     -e "s|^INTENT_STORE_DIR=.*|INTENT_STORE_DIR=$scratch/restored/store|" "$env_file" >"$restored_env"
-(set -a; . "$restored_env"; set +a; exec "$prefix/bin/intent-server" serve) >"$scratch/restored.log" 2>&1 &
+(set -a; . "$restored_env"; set +a; exec ${jail_wrap[@]+"${jail_wrap[@]}"} "$prefix/bin/intent-server" serve) >"$scratch/restored.log" 2>&1 &
 pids+=($!)
 for _ in $(seq 1 100); do curl -sf "http://127.0.0.1:$restore_port/readyz" >/dev/null && break; sleep 0.1; done
 restored_cookie="$(curl -s -D - -o /dev/null -H 'content-type: application/json' \

@@ -4,7 +4,8 @@
 #   <out>/intent-studio-<commit>.tar.gz
 #     intent-studio/bin/intent-server, bin/intent-worker   (release builds)
 #     intent-studio/workspace/                             (the built workspace app)
-#     intent-studio/deploy/                                (systemd unit, env example, Caddyfile)
+#     intent-studio/deploy/                                (systemd unit, env example, Caddyfile,
+#                                                           the browser-jail AppArmor profile)
 #     intent-studio/OPERATOR_GUIDE.md
 #
 # Usage: scripts/package.sh [out directory, default dist]. Prints the package's path.
@@ -29,6 +30,8 @@ cp "$bin/intent-server" "$bin/intent-worker" "$root/bin/"
 scripts/check-seams.sh "$root/bin/intent-server" >&2
 cp -R apps/workspace/build/. "$root/workspace/"
 cp deploy/intent-studio.service deploy/intent-studio.env.example deploy/Caddyfile "$root/deploy/"
+mkdir -p "$root/deploy/apparmor.d"
+cp deploy/apparmor.d/intent-jail "$root/deploy/apparmor.d/"
 cp docs/OPERATOR_GUIDE.md "$root/"
 package="$out/intent-studio-$(git rev-parse --short HEAD).tar.gz"
 tar -C "$stage" -czf "$package" intent-studio

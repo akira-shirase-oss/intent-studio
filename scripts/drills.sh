@@ -71,7 +71,27 @@ run generation-fails-seams cargo test --release --locked -p intent-server --feat
 # bodies live in intent-render (no C deps), where they compile-check under the
 # linux target on any host; on non-Linux they compile to nothing, so the suite
 # is CI's proof either way.
-run browser-confinement cargo test --release --locked -p intent-render --features mutation-seams \
+#
+# A host that restricts unprivileged user namespaces (Ubuntu 24.04's default
+# kernel.apparmor_restrict_unprivileged_userns=1) refuses the jail's first
+# unshare. Rather than relax the sysctl here, the suite runs under the shipped
+# AppArmor profile — the scoped grant the droplet carries — so a restricted-
+# host run also proves the profile alone suffices. A host already relaxed
+# (the CI drills job relaxes it for the raw-namespace evidence) or without
+# the restriction runs unwrapped; if the profile cannot be armed, the suite
+# still runs and reports the stage-named jail refusal itself.
+bc_wrap=()
+if [ "$(uname -s)" = Linux ] \
+    && [ "$(sysctl -n kernel.apparmor_restrict_unprivileged_userns 2>/dev/null || echo 0)" = 1 ]; then
+    if sudo install -m 0644 deploy/apparmor.d/intent-jail /etc/apparmor.d/intent-jail \
+        && sudo apparmor_parser -r /etc/apparmor.d/intent-jail \
+        && command -v aa-exec >/dev/null; then
+        bc_wrap=(aa-exec -p intent-jail --)
+    else
+        echo "browser-confinement: could not arm the AppArmor wrap; the suite will show the jail refusal" >&2
+    fi
+fi
+run browser-confinement ${bc_wrap[@]+"${bc_wrap[@]}"} cargo test --release --locked -p intent-render --features mutation-seams \
     --no-fail-fast --test browser_confinement \
     -- --ignored --test-threads=1
 

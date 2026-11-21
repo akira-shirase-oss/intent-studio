@@ -49,6 +49,8 @@ sudo cp -R workspace/. /opt/intent-studio/workspace/
 sudo install -d -m 0750 -g intent /etc/intent-studio
 sudo install -m 0600 deploy/intent-studio.env.example /etc/intent-studio/intent-studio.env
 sudo install -m 0644 deploy/intent-studio.service /etc/systemd/system/intent-studio.service
+sudo install -m 0644 deploy/apparmor.d/intent-jail /etc/apparmor.d/intent-jail
+sudo apparmor_parser -r /etc/apparmor.d/intent-jail
 sudo systemctl daemon-reload
 ```
 
@@ -64,6 +66,32 @@ job's life — its only channels are the stdin and stdout pipes the server gave 
 itself goes non-dumpable at start, so its `/proc/<pid>/environ` (which holds the database URL
 and the operator hash) is unreadable to the worker and to anything else running as `intent`;
 the env file stays root-only `0600`, readable only by systemd.
+
+### Browser jail
+
+The check suite's browser jobs render a hostile bundle under a fresh set of
+namespaces — no network, a `pivot_root`'d tmpfs for a filesystem, bounded
+everything (docs/BROWSER-CONFINEMENT.md). Building that jail needs an
+unprivileged **user namespace**, and Ubuntu 24.04's
+`kernel.apparmor_restrict_unprivileged_userns=1` (the default) refuses those
+to unprofiled programs. `deploy/apparmor.d/intent-jail` is the grant: it
+attaches to `/opt/intent-studio/bin/intent-server` and `intent-worker` and
+adds only the `userns` permission — the binaries stay otherwise unconfined;
+the jail is the confinement. The unit carries `AppArmorProfile=intent-jail`,
+so the service will not start until the profile is installed and loaded with
+`apparmor_parser` (the install step above) — fail closed, never an unconfined
+browser.
+
+Do **not** fix this by setting the sysctl to `0` on the host: that opens user
+namespaces for every unprofiled program on the machine, not just ours. The
+profile is the scoped grant.
+
+At boot the server runs the jail self-check — a confined `/bin/true` through
+the exact same path a browser job takes — before it marks ready. If the jail
+cannot start, production refuses to serve and the log names the stage that
+failed (`unshare(user)`, `idmap`, `unshare(net/mount/ipc/pid)`, `mount`,
+`pivot_root`). A `unshare(user)` refusal on a stock Ubuntu 24.04 almost
+always means this profile was skipped.
 
 ## First run
 
@@ -202,6 +230,7 @@ compares what came back.
 | The service exits at start with `invalid configuration (N problem(s))` | One or more settings are missing or out of range | Run `check-config` (First run, step 3); fix each line it prints |
 | `INTENT_STORE_DIR ...: store I/O failed` at start | The store directory cannot be written | `chown -R intent:intent /var/lib/intent-studio`; check the disk is not full |
 | `INTENT_WORKER_BIN: no worker at ...` at start | `intent-worker` is missing | Install it beside `intent-server`, or set `INTENT_WORKER_BIN` |
+| The service exits at start with `browser confinement jail cannot start` | The jail self-check failed; the message names the stage — on stock Ubuntu 24.04 `unshare(user)` means the AppArmor grant is missing | Install `deploy/apparmor.d/intent-jail` and `apparmor_parser -r` it (Browser jail). Never set `kernel.apparmor_restrict_unprivileged_userns=0` to silence it |
 | `/readyz` answers 503 with `"database":"down"` | PostgreSQL cannot be reached | Leads are refused with `503` and `Retry-After` (nothing is acknowledged that is not stored); bring PostgreSQL back and readiness turns green within a second |
 | Sign-in says it is not configured | `INTENT_OPERATOR_PASSWORD_HASH` is not set | Hash a password (First run, step 2) and restart |
 | Sign-in says to wait a minute | Five attempts a minute per address, 20 failed ones a minute overall (D-041, D-052) | Wait; an address you signed in from in the last 30 days is not held up by others' attempts |

@@ -82,6 +82,13 @@ jobs:
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
       - name: Keep outgoing ports below the stack's
         run: sudo sysctl -w net.ipv4.ip_local_port_range="20000 50999"
+      # Ubuntu 24.04 defaults kernel.apparmor_restrict_unprivileged_userns=1, which
+      # refuses the user namespaces the browser-confinement proofs build. On the
+      # ephemeral runner the scoped relax is right — production instead carries
+      # the AppArmor profile (deploy/apparmor.d/intent-jail); never weaken the
+      # jail itself to make CI green.
+      - name: Allow the jail proofs their user namespaces
+        run: sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
       - run: scripts/drills.sh
       # The shipped binary is what the attacks just ran against — prove it carries no seam.
       # `if: !cancelled()` so a red drills run can never hide it (B1).

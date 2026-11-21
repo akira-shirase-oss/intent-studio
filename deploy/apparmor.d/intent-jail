@@ -1,0 +1,28 @@
+# Intent Studio — browser-jail AppArmor profile.
+#
+# Ubuntu 24.04 restricts unprivileged user-namespace creation to programs
+# carrying a profile that grants the `userns` permission
+# (kernel.apparmor_restrict_unprivileged_userns=1, the default). The check
+# worker's browser confinement (docs/BROWSER-CONFINEMENT.md) builds its jail
+# out of `unshare` + `pivot_root`, so the launcher binaries need that grant.
+#
+# flags=(unconfined) keeps the binaries otherwise unconfined — the jail
+# itself (fresh user/net/mount/ipc/pid namespaces, a pivot_root'd tmpfs,
+# rlimits, group kill) is the confinement; this profile exists only so the
+# kernel will let it be built. Children exec'd from these binaries (unshare,
+# sh, mount, the browser) stay under the profile and inherit the grant.
+#
+# Install: docs/OPERATOR_GUIDE.md, "Browser jail" —
+#   sudo install -m 0644 deploy/apparmor.d/intent-jail /etc/apparmor.d/intent-jail
+#   sudo apparmor_parser -r /etc/apparmor.d/intent-jail
+# The systemd unit carries AppArmorProfile=intent-jail, so the service will
+# not start until this profile is loaded — that is the fail-closed side.
+
+abi <abi/4.0>,
+include <tunables/global>
+
+profile intent-jail /opt/intent-studio/bin/{intent-server,intent-worker} flags=(unconfined) {
+  userns,
+
+  include if exists <local/intent-jail>
+}
