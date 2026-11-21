@@ -50,13 +50,10 @@ pub struct Inner {
     pub db: Db,
     /// The session table's own small pool, so a flood of bad cookies cannot starve intake's.
     pub sessions: Db,
-    /// The sign-out connection of one: only operator sign-outs and their tracked retries
-    /// reach it, so no unauthenticated path — cookie flood or sign-in flood — can queue a
-    /// delete behind a 5xx.
+    /// The sign-out connection of one: only operator sign-outs reach it, so no
+    /// unauthenticated path — cookie flood or sign-in flood — can queue a delete
+    /// behind a 5xx. It is what keeps the honest 503 rare (D-069).
     pub signout_db: Db,
-    /// Sign-out deletes a refused attempt could not confirm: one tracked task per
-    /// digest, journaled so a restart re-tombstones and resumes them (NEW-1).
-    pub retries: Arc<std::sync::Mutex<crate::operator::Retries>>,
     /// Liveness and readiness.
     pub health: Health,
     /// Counters.
@@ -112,13 +109,8 @@ impl App {
         signout_db: Db,
         health: Health,
         studio: Studio,
-    ) -> std::io::Result<Self> {
-        // The journal lives in the state directory — independent of the optional content
-        // store — so pending sign-out deletes survive a restart through it (NEW-1, E).
-        // An unreadable or oversized journal refuses the boot rather than dropping debt.
-        let journal = config.state_dir.join("signout-pending.journal");
-        let retries = crate::operator::Retries::open(Some(journal))?;
-        Ok(Self(Arc::new(Inner {
+    ) -> Self {
+        Self(Arc::new(Inner {
             gate: Arc::new(Semaphore::new(config.max_in_flight)),
             address_limiter: Limiter::new(config.address_quota, config.rate_table_entries),
             site_limiter: Limiter::new(config.site_quota, config.rate_table_entries),
@@ -135,9 +127,8 @@ impl App {
             db,
             sessions,
             signout_db,
-            retries: Arc::new(std::sync::Mutex::new(retries)),
             health,
-        })))
+        }))
     }
 
     /// Milliseconds on the process's monotonic clock (for token buckets), plus any
@@ -204,16 +195,23 @@ async fn healthz() -> Json<serde_json::Value> {
     Json(json!({ "status": "ok" }))
 }
 
-/// The most one `POST /__test/clock` call may move `now_ms` (K).
+/// The most one `POST /__test/clock` call may move `now_ms` (K). The route and its
+/// env exist only under the mutation-seams feature — a request-reachable clock in a
+/// shipped binary would let an env-file mistake skew sessions, budgets and rate
+/// limits for anyone who can reach the port.
+#[cfg(feature = "mutation-seams")]
 const MAX_CLOCK_ADVANCE_MS: u64 = 40 * 24 * 3_600_000;
 
+#[cfg(feature = "mutation-seams")]
 #[derive(serde::Deserialize)]
 struct ClockAdvance {
     advance_ms: u64,
 }
 
 /// `POST /__test/clock`: a drill advances the process clock instead of sleeping on
-/// wall time (K). Mounted only under `INTENT_TEST_CLOCK`; unbounded moves are refused.
+/// wall time (K). Compiled only under `mutation-seams`, mounted only under
+/// `INTENT_TEST_CLOCK`; unbounded moves are refused.
+#[cfg(feature = "mutation-seams")]
 async fn advance_clock(State(app): State<App>, Json(body): Json<ClockAdvance>) -> StatusCode {
     if body.advance_ms == 0 || body.advance_ms > MAX_CLOCK_ADVANCE_MS {
         return StatusCode::UNPROCESSABLE_ENTITY;
@@ -435,6 +433,7 @@ pub fn router(app: App) -> Router {
                 .delete(operator::sign_out),
         )
         .route("/v1/operator/leads", get(operator::inbox));
+    #[cfg(feature = "mutation-seams")]
     if app.config.test_clock {
         spine = spine.route("/__test/clock", post(advance_clock));
     }

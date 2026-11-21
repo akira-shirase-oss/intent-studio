@@ -190,15 +190,11 @@ pub struct Config {
     /// Mark the session cookie `Secure`.
     pub cookie_secure: bool,
     /// Mount `POST /__test/clock` so drills can advance `now_ms` without wall-clock
-    /// waits (K). `INTENT_TEST_CLOCK`; default off — no request may move the clock
-    /// in production.
+    /// waits (K). `INTENT_TEST_CLOCK` parses only under the mutation-seams feature —
+    /// always false in a shipped binary.
     pub test_clock: bool,
     /// The built workspace app, served at `/workspace`.
     pub workspace_dir: Option<PathBuf>,
-    /// `INTENT_STATE_DIR`: crash-durable runtime state — the sign-out retry journal —
-    /// independent of the optional content store (E). Default `intent-state` under the
-    /// working directory; production sets it absolute.
-    pub state_dir: PathBuf,
     /// The content store and the asset worker.
     pub studio: StudioConfig,
     /// Log format.
@@ -619,9 +615,12 @@ impl Config {
         }
         let cookie_secure = env.parse("INTENT_COOKIE_SECURE", true);
         // `INTENT_TEST_CLOCK` mounts `POST /__test/clock`, the drills' way to age the
-        // process clock without a wall-clock wait (K). Off everywhere else: nothing a
-        // request can reach may move `now_ms` in production.
+        // process clock without a wall-clock wait (K) — compiled only under the
+        // mutation-seams feature, so no env file can ever arm it in a shipped binary.
+        #[cfg(feature = "mutation-seams")]
         let test_clock = env.parse("INTENT_TEST_CLOCK", false);
+        #[cfg(not(feature = "mutation-seams"))]
+        let test_clock = false;
         // An insecure operator cookie in production would ride every plaintext hop.
         if !cookie_secure && profile != Profile::Development {
             env.problems.push(
@@ -629,10 +628,6 @@ impl Config {
             );
         }
         let workspace_dir = env.raw("INTENT_WORKSPACE_DIR").map(PathBuf::from);
-        let state_dir = env
-            .raw("INTENT_STATE_DIR")
-            .filter(|v| !v.trim().is_empty())
-            .map_or_else(|| PathBuf::from("intent-state"), PathBuf::from);
         let studio = StudioConfig {
             store_dir: env
                 .raw("INTENT_STORE_DIR")
@@ -708,7 +703,6 @@ impl Config {
                 cookie_secure,
                 test_clock,
                 workspace_dir,
-                state_dir,
                 studio,
                 log_format,
                 log_filter,

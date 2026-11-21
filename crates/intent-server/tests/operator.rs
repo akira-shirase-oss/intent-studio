@@ -259,6 +259,7 @@ async fn the_operators_known_address_gets_through_a_distributed_flood() {
 /// live session, so the address hears 429 after a small quota — and lead intake, on a pool the
 /// flood cannot see, keeps answering (S2 review: the session check was an unpriced UPDATE on
 /// intake's own pool).
+#[cfg(feature = "mutation-seams")] // POST /__test/clock exists only in feature builds (K).
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[ignore = "needs the stack: scripts/stack.sh up (run by scripts/drills.sh)"]
 async fn a_flood_of_bad_session_cookies_is_limited_and_leaves_intake_alone() {
@@ -407,6 +408,7 @@ async fn a_flood_of_bad_session_cookies_is_limited_and_leaves_intake_alone() {
 /// 204 — or an honest 503 saying unsure — never a 2xx that leaves the row live. A 204
 /// clears the cookie; a 503 keeps it, because the session is still live and the client
 /// must be able to retry (N7 residual).
+#[cfg(feature = "mutation-seams")] // only the clock-injected flood drill calls it
 async fn assert_sign_out_survives(client: &reqwest::Client, base: &str, cookie: &str) {
     let out = client
         .delete(format!("{base}/v1/operator/session"))
@@ -438,21 +440,16 @@ async fn assert_sign_out_survives(client: &reqwest::Client, base: &str, cookie: 
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[ignore = "needs the stack: scripts/stack.sh up (run by scripts/drills.sh)"]
-async fn a_sign_out_the_database_cannot_confirm_stays_revoked_until_the_retry_lands() {
+async fn a_sign_out_the_database_cannot_confirm_is_an_honest_503_and_the_cookie_stays() {
+    // D-069: sign-out either confirms the delete or says so. A blocked delete is a 503
+    // with the cookie KEPT — no tombstone for an unconfirmed delete, no background
+    // retry; the session stays live until a later attempt confirms.
     let db = TestDb::create(1).await;
     let fixture = ProviderFixture::start(Mode::Ok).await;
     let mut env = drill_env(&db, &fixture.url);
     env.retain(|(k, _)| k != "INTENT_COOKIE_SECURE");
     env.push(("INTENT_OPERATOR_PASSWORD_HASH".into(), hash()));
     env.push(("INTENT_TRUSTED_PROXIES".into(), "127.0.0.1".into()));
-    // The retry journal lives in the state directory — no content store is configured,
-    // so this drill also proves the journal is store-independent (E).
-    let state_dir = std::env::temp_dir().join(format!(
-        "intent-drill-state-{}",
-        uuid::Uuid::now_v7().simple()
-    ));
-    std::fs::create_dir_all(&state_dir).unwrap();
-    env.push(("INTENT_STATE_DIR".into(), state_dir.display().to_string()));
     let server = Server::start(env).await;
     let client = client();
     let cookie = sign_in(&client, &server.base, PASSWORD, "10.81.0.1", "req-lock").await;
@@ -470,8 +467,7 @@ async fn a_sign_out_the_database_cannot_confirm_stays_revoked_until_the_retry_la
     let session = format!("{}/v1/operator/session", server.base);
     let valid = || client.get(&session).header("cookie", &cookie);
 
-    // Hold the session row hostage: the delete must fail, the answer must be honest, and
-    // the tombstone must refuse the still-live row for longer than any old cache window.
+    // Hold the session row hostage: the delete must fail and the answer must be honest.
     // A row lock, not ACCESS EXCLUSIVE: a table lock blocks the plain SELECTs below too
     // and the drill deadlocks on its own assertion (NEW-2).
     let mut lock = db.connect().await;
@@ -493,7 +489,8 @@ async fn a_sign_out_the_database_cannot_confirm_stays_revoked_until_the_retry_la
             .is_none_or(|v| !v.to_str().unwrap().contains("Max-Age=0")),
         "an unconfirmed sign-out dropped the live cookie"
     );
-    // The row is still live — prove it before the tombstone's claim alone gets credit.
+    // The row is still live — and the session honestly still works: only a confirmed
+    // delete earns a tombstone (D-069).
     let mut rows = db.connect().await;
     let live: i64 = sqlx::query_scalar("SELECT count(*) FROM operator_sessions")
         .fetch_one(&mut rows)
@@ -502,13 +499,11 @@ async fn a_sign_out_the_database_cannot_confirm_stays_revoked_until_the_retry_la
     assert_eq!(live, 1, "the row died behind the failed delete");
     assert_eq!(
         valid().send().await.unwrap().status(),
-        401,
-        "a still-live row answered after the failed sign-out"
+        200,
+        "an unconfirmed delete broke the still-live session — it must stay valid"
     );
-    // A second sign-out of the same digest is answered from the retry's memory —
-    // no second task, no second slot in the journal, no queue on the one
-    // connection (NEW-1). Status alone cannot tell the memory answer from the
-    // locked-row 503, so the counter is the assertion that can go red (H).
+    // A second attempt while the row is held is another honest 503 — every attempt is
+    // real; nothing is answered from a pending set that no longer exists.
     let again = client
         .delete(&session)
         .header("cookie", &cookie)
@@ -518,67 +513,40 @@ async fn a_sign_out_the_database_cannot_confirm_stays_revoked_until_the_retry_la
     assert_eq!(
         again.status(),
         503,
-        "a pending retry's repeat was not answered from memory"
-    );
-    let journal = state_dir.join("signout-pending.journal");
-    assert_eq!(
-        std::fs::metadata(&journal)
-            .expect("no retry journal in the state directory")
-            .len(),
-        32,
-        "the journal must hold exactly one digest record"
-    );
-    let metrics = client
-        .get(format!("{}/metrics", server.base))
-        .send()
-        .await
-        .unwrap()
-        .text()
-        .await
-        .unwrap();
-    assert!(
-        metrics.contains("intent_signout_pending_answers_total 1\n"),
-        "the memory answer was not counted — delete its path and this assertion goes red"
+        "the held row must not confirm a delete"
     );
 
-    // Free the row: the tracked retry must finish the delete without another request.
+    // Free the row and retry — the operator's retry, not a background task: the delete
+    // confirms, the row is gone, the digest is tombstoned.
     sqlx::query("ROLLBACK").execute(&mut lock).await.unwrap();
     drop(lock);
-    let mut gone = false;
-    // The retry's first re-attempt sits behind its 30 s backoff — poll past it.
-    for _ in 0..160 {
-        let live: i64 = sqlx::query_scalar("SELECT count(*) FROM operator_sessions")
-            .fetch_one(&mut rows)
-            .await
-            .unwrap();
-        if live == 0 {
-            gone = true;
-            break;
-        }
-        tokio::time::sleep(Duration::from_millis(250)).await;
-    }
-    assert!(gone, "the background retry never deleted the row");
+    let settled = client
+        .delete(&session)
+        .header("cookie", &cookie)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(
+        settled.status(),
+        204,
+        "the retried sign-out did not confirm"
+    );
+    let live: i64 = sqlx::query_scalar("SELECT count(*) FROM operator_sessions")
+        .fetch_one(&mut rows)
+        .await
+        .unwrap();
+    assert_eq!(live, 0, "the row survived a confirmed delete");
     assert_eq!(valid().send().await.unwrap().status(), 401);
     // The confirmed delete is answered from the tombstone's memory: a thief looping the
     // revoked cookie gets no uncharged DELETE on the one connection — and the counter is
-    // what proves the DB was never asked (H). The row's deletion is observed a hair
-    // before `pending` drops the digest, so the answer can still be a pending 503 for
-    // a moment — poll for the tombstone answer.
-    let mut settled_status = 503;
-    for _ in 0..40 {
-        let settled = client
-            .delete(&session)
-            .header("cookie", &cookie)
-            .send()
-            .await
-            .unwrap();
-        settled_status = settled.status().as_u16();
-        if settled_status == 204 {
-            break;
-        }
-        tokio::time::sleep(Duration::from_millis(100)).await;
-    }
-    assert_eq!(settled_status, 204);
+    // what proves the DB was never asked (H).
+    let settled = client
+        .delete(&session)
+        .header("cookie", &cookie)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(settled.status(), 204);
     let metrics = client
         .get(format!("{}/metrics", server.base))
         .send()
@@ -596,151 +564,89 @@ async fn a_sign_out_the_database_cannot_confirm_stays_revoked_until_the_retry_la
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[ignore = "needs the stack: scripts/stack.sh up (run by scripts/drills.sh)"]
-async fn a_restart_resumes_the_sign_out_retry_from_its_journal() {
-    // A restart must not drop the debt: the journaled digest is re-tombstoned and its
-    // delete retried by the new process, so the still-live row stays refused (N7).
+async fn a_restart_seeds_only_in_window_sign_ins_under_the_current_credential() {
+    // A boot seed must carry the audit's own window — `at + 30d`, never a fresh
+    // `now + 30d` — and only sign-ins under the current credential (D, D-069).
+    // Three seeded rows separate the cases. Then the GLOBAL minute budget is
+    // spent from FOUR OTHER addresses so only the day budget can let a sign-in
+    // through — the 5/min per-address quota would refuse a sixth attempt on its
+    // own and hide the difference; the flood is what makes the test red.
     let db = TestDb::create(1).await;
     let fixture = ProviderFixture::start(Mode::Ok).await;
     let mut env = drill_env(&db, &fixture.url);
     env.retain(|(k, _)| k != "INTENT_COOKIE_SECURE");
-    env.push(("INTENT_OPERATOR_PASSWORD_HASH".into(), hash()));
+    let hash = hash();
+    env.push(("INTENT_OPERATOR_PASSWORD_HASH".into(), hash.clone()));
     env.push(("INTENT_TRUSTED_PROXIES".into(), "127.0.0.1".into()));
-    // The state directory, not the content store — this restart proves the journal
-    // works with no store configured at all (E).
-    let state_dir = std::env::temp_dir().join(format!(
-        "intent-drill-state-{}",
-        uuid::Uuid::now_v7().simple()
-    ));
-    std::fs::create_dir_all(&state_dir).unwrap();
-    env.push(("INTENT_STATE_DIR".into(), state_dir.display().to_string()));
-    let mut server = Server::start(env).await;
-    let client = client();
-    let cookie = sign_in(&client, &server.base, PASSWORD, "10.82.0.1", "req-restart").await;
-    assert_eq!(cookie.status(), 200);
-    let cookie = cookie
-        .headers()
-        .get("set-cookie")
-        .unwrap()
-        .to_str()
-        .unwrap()
-        .split(';')
-        .next()
-        .unwrap()
-        .to_owned();
-    let session = format!("{}/v1/operator/session", server.base);
-    let valid = || client.get(&session).header("cookie", &cookie);
-
-    // Hold the row hostage so the delete cannot confirm, then kill the server the
-    // hard way: no drain, no cleanup — the journal is the only record of the debt.
-    let mut lock = db.connect().await;
-    sqlx::query("BEGIN").execute(&mut lock).await.unwrap();
-    sqlx::query("SELECT token_digest FROM operator_sessions FOR UPDATE")
-        .execute(&mut lock)
-        .await
-        .unwrap();
-    let out = client
-        .delete(&session)
-        .header("cookie", &cookie)
-        .send()
-        .await
-        .unwrap();
-    assert_eq!(out.status(), 503);
-    assert_eq!(
-        std::fs::metadata(state_dir.join("signout-pending.journal"))
-            .expect("the debt was never journaled")
-            .len(),
-        32
-    );
-    server.kill();
-    server.restart().await;
-
-    // The new process re-tombstoned the digest from the journal before it went
-    // ready: the row is still live (the lock still holds) yet the replay refuses.
-    assert_eq!(
-        valid().send().await.unwrap().status(),
-        401,
-        "the journaled digest was not re-tombstoned at boot — a live row answered"
-    );
-    let mut rows = db.connect().await;
-    let live: i64 = sqlx::query_scalar("SELECT count(*) FROM operator_sessions")
-        .fetch_one(&mut rows)
-        .await
-        .unwrap();
-    assert_eq!(live, 1, "the row died while the lock still held it");
-
-    // Free the row: the new process's resumed retry finishes the delete.
-    sqlx::query("ROLLBACK").execute(&mut lock).await.unwrap();
-    drop(lock);
-    let mut gone = false;
-    for _ in 0..160 {
-        let live: i64 = sqlx::query_scalar("SELECT count(*) FROM operator_sessions")
-            .fetch_one(&mut rows)
-            .await
-            .unwrap();
-        if live == 0 {
-            gone = true;
-            break;
-        }
-        tokio::time::sleep(Duration::from_millis(250)).await;
-    }
-    assert!(gone, "the resumed retry never deleted the row");
-    assert_eq!(valid().send().await.unwrap().status(), 401);
-    db.drop_database().await;
-}
-
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-#[ignore = "needs the stack: scripts/stack.sh up (run by scripts/drills.sh)"]
-async fn a_restart_does_not_renew_a_known_address_window() {
-    // A boot seed must carry the audit's own window — at + 30d — never a fresh
-    // now + 30d: under the bug every restart keeps an address known forever, and a
-    // thief's address survives the password rotation that was meant to evict it (D).
-    // The injected clock is the audit row itself: written at the window's very edge,
-    // inside it at seed time and out of it seconds later.
-    let db = TestDb::create(1).await;
-    let fixture = ProviderFixture::start(Mode::Ok).await;
-    let mut env = drill_env(&db, &fixture.url);
-    env.retain(|(k, _)| k != "INTENT_COOKIE_SECURE");
-    env.push(("INTENT_OPERATOR_PASSWORD_HASH".into(), hash()));
-    env.push(("INTENT_TRUSTED_PROXIES".into(), "127.0.0.1".into()));
+    // The fingerprint the server computes from the env's hash — the drill seeds
+    // audit rows the server's own sign-in would have written.
+    let fp = {
+        let d = <sha2::Sha256 as sha2::Digest>::digest(hash.as_bytes());
+        hex::encode(&d[..16])
+    };
     let mut conn = db.connect().await;
+    // 10.83.9.9  — deep inside the window under the current credential: stays known.
+    // 10.83.9.10 — 8 s left on its audit window: the mark must die on the audit's
+    //              own clock, not renew for 30 days at boot (the renewal bug).
+    // 10.83.9.11 — fresh but under a rotated-out credential: rotation evicts it.
     sqlx::query(
-        "INSERT INTO operator_audit (action, address, at)
-         VALUES ('operator.sign_in', '10.83.9.9', now() - interval '30 days' + interval '8 seconds')",
+        "INSERT INTO operator_audit (action, address, at, detail) VALUES
+         ('operator.sign_in', '10.83.9.9',  now() - interval '1 minute',
+            jsonb_build_object('credential_fp', $1::text)),
+         ('operator.sign_in', '10.83.9.10', now() - interval '30 days' + interval '8 seconds',
+            jsonb_build_object('credential_fp', $1::text)),
+         ('operator.sign_in', '10.83.9.11', now() - interval '1 minute',
+            jsonb_build_object('credential_fp', 'a-rotated-out-fingerprint'))",
     )
+    .bind(&fp)
     .execute(&mut conn)
     .await
     .unwrap();
-    let server = Server::start(env).await; // the boot seeds the address's remaining ~8 s
+    let server = Server::start(env).await;
     let client = client();
-    // The audit's own window passes: under `now + window` the address stays known for
-    // 30 more days; under `at + window` it is gone.
+    // The edge-of-window row's own clock runs out — the seed marks expiry on wall
+    // time (the audit `at`s are wall-clock), so only a real wait observes it.
     tokio::time::sleep(Duration::from_secs(10)).await;
-    // Past the window the address pays the shared minute again — five wrong passwords
-    // spend it, and the sixth try (the right password) is refused (D). Were the address
-    // still 'known', each try would spend its day budget and this one would sign in.
-    for attempt in 0..5 {
-        let bad = sign_in(
-            &client,
-            &server.base,
-            "a wrong password",
-            "10.83.9.9",
-            &format!("req-window-{attempt}"),
-        )
-        .await;
-        assert_eq!(bad.status(), 401);
+
+    // Spend the GLOBAL 20/minute verification budget from four other addresses —
+    // five wrong passwords each, the per-address admit bound. After this, only an
+    // address carrying the day budget (a seeded known address) can verify at all.
+    for host in 1..=4 {
+        for attempt in 0..5 {
+            let bad = sign_in(
+                &client,
+                &server.base,
+                "a wrong password",
+                &format!("10.83.20.{host}"),
+                &format!("req-flood-{host}-{attempt}"),
+            )
+            .await;
+            assert_eq!(bad.status(), 401, "the flood was not even admitted");
+        }
     }
-    let right = sign_in(
-        &client,
-        &server.base,
-        PASSWORD,
-        "10.83.9.9",
-        "req-window-right",
-    )
-    .await;
+
+    // Legitimately known: its own day budget answers 200 — this proves the flood
+    // actually spent the global budget and that knownness still bypasses it.
+    let known = sign_in(&client, &server.base, PASSWORD, "10.83.9.9", "req-known").await;
     assert_eq!(
-        right.status(),
+        known.status(),
+        200,
+        "a legitimately-known address did not keep its day budget"
+    );
+    // Window passed on the audit's own clock: under `now + window` the restart
+    // renewed it and this is a 200 — the red line the review demanded.
+    let stale = sign_in(&client, &server.base, PASSWORD, "10.83.9.10", "req-stale").await;
+    assert_eq!(
+        stale.status(),
         429,
-        "the restart renewed the window — the address kept its day budget"
+        "the restart renewed an expired window — the address kept a day budget it had lost"
+    );
+    // Rotated-out credential: a fresh sign-in under the old password seeds nothing.
+    let rotated = sign_in(&client, &server.base, PASSWORD, "10.83.9.11", "req-rotated").await;
+    assert_eq!(
+        rotated.status(),
+        429,
+        "a sign-in under a rotated-out credential still conferred the day budget"
     );
     db.drop_database().await;
 }

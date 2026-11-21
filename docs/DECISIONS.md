@@ -920,6 +920,34 @@ starting values; changing one needs a measurement and a new entry.
   whole response, or a clean close before its bytes — never a truncated
   response mid-request.
 
+- **D-069 — Sign-out is synchronous: confirmed, or honestly failed.**
+  `DELETE /v1/operator/session` has exactly two outcomes. The row's
+  delete confirmed → 204, the confirmed digest earns a tombstone in
+  memory for the session TTL, and repeat requests with the same cookie
+  answer 204 without touching the database. The delete could not
+  confirm (a lock, a pool error, a timeout) → 503 with the cookie
+  KEPT — no tombstone, no claimed success — and the UI answers
+  "Sign-out failed — retry" so the operator knows the session is still
+  live. There is no background retry and no on-disk journal: the first
+  implementation carried a retry task, a journaled pending set and a
+  state directory, and each review round found it leaked a class of
+  failure the synchronous answer never had (a tombstone for a delete
+  never confirmed, a cancelled task leaving pending debt, a stale
+  journal snapshot, a boot loop on an unwritable state dir). The
+  dedicated one-connection `signout_db` pool stays — it exists so no
+  unauthenticated flood can queue ahead of the delete, which is what
+  keeps the honest 503 rare. A restart drops the tombstone memory and
+  the row's `DELETE`/`SELECT` do the work again; nothing is owed across
+  a boot. The same ruling binds the known-address seed: a restart marks
+  an address only for the remainder of its OWN audit window (`at +
+  30d`, never a fresh `now + 30d`), and only for sign-ins recorded
+  under the CURRENT credential — each `operator.sign_in` audit row
+  carries `credential_fp` (SHA-256 of the configured hash, truncated),
+  so a rotation means a thief's last successful sign-in stops
+  conferring the 100/day budget the moment it happens, at the cost of
+  the operator's usual address also losing it until it signs in once
+  under the new password — the trade-off a rotation is for.
+
 ## Open questions (still open)
 
 These need the maintainer or an outside party; each is in the README's

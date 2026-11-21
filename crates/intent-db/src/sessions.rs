@@ -65,23 +65,28 @@ impl Db {
         .map_err(classify)
     }
 
-    /// The newest addresses that produced a session within `within`, each with its latest
-    /// sign-in time — the boot seed for the known-address memory (N10). The time travels
-    /// with the row so a restart marks `at + window`, never a fresh window, and the LIMIT
-    /// bounds the read (D).
+    /// The newest addresses that produced a session within `within` UNDER THE CURRENT
+    /// CREDENTIAL, each with its latest sign-in time — the boot seed for the
+    /// known-address memory (N10). The time travels with the row so a restart marks
+    /// `at + window`, never a fresh window, and the LIMIT bounds the read (D). Only
+    /// rows carrying `credential_fp` count: a sign-in under a rotated-out credential
+    /// must not keep its address's day budget (the rotation trade-off).
     pub async fn recent_signer_addresses(
         &self,
         within: Duration,
+        credential_fp: &str,
     ) -> Result<Vec<(String, time::OffsetDateTime)>, DbError> {
         sqlx::query_as::<_, (String, time::OffsetDateTime)>(
             "SELECT address, max(at) AS last_at FROM operator_audit
              WHERE action = 'operator.sign_in' AND address IS NOT NULL
+               AND detail->>'credential_fp' = $2
                AND at > now() - $1 * interval '1 second'
              GROUP BY address ORDER BY last_at DESC LIMIT 65536",
         )
         .bind(f64::from(
             u32::try_from(within.as_secs()).unwrap_or(u32::MAX),
         ))
+        .bind(credential_fp)
         .fetch_all(&self.pool)
         .await
         .map_err(classify)

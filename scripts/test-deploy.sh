@@ -69,7 +69,6 @@ sed -e "s|postgres://intent:__DB_PASSWORD__@127.0.0.1:5432/intent|postgres://int
     -e "s|http://127.0.0.1:59480/v1/notify|http://127.0.0.1:$fixture_port/v1/notify|" \
     -e "s|/opt/intent-studio|$prefix|g" \
     -e "s|/var/lib/intent-studio/store|$scratch/store|" \
-    -e "s|/var/lib/intent-studio/state|$scratch/state|" \
     deploy/intent-studio.env.example >"$env_file"
 grep -q '__' <(grep -v '^#' "$env_file") && fail "a placeholder is left in the env file"
 run() { (set -a; . "$env_file"; set +a; exec "$prefix/bin/intent-server" "$@"); }

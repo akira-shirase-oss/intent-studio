@@ -9,4 +9,3 @@ node_modules/
 /apps/workspace/test-results/
 /apps/workspace/playwright-report/
 /dist/
-/intent-state/

@@ -327,15 +327,6 @@ impl Server {
             let address: SocketAddr = format!("127.0.0.1:{port}").parse().unwrap();
             let mut env = env.clone();
             env.push(("INTENT_BIND".into(), address.to_string()));
-            // Each server owns its retry journal — a shared ./intent-state would let one
-            // drill's debt leak into another's boot (E). A drill that needs the path
-            // passes its own.
-            if !env.iter().any(|(k, _)| k == "INTENT_STATE_DIR") {
-                env.push((
-                    "INTENT_STATE_DIR".into(),
-                    dir.join("state").display().to_string(),
-                ));
-            }
             let mut server = Self {
                 child: None,
                 address,

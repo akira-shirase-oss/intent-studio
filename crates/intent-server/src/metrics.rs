@@ -61,7 +61,6 @@ counters! {
     notify_dead_total: "Outbox rows that stopped (attempts exhausted or rejected).",
     notify_lease_lost_total: "Results discarded because the lease had expired.",
     notify_swept_total: "Rows marked dead after dying holding their last attempt.",
-    signout_pending_answers_total: "Sign-outs refused 503 from memory while a tracked retry owns the digest.",
     signout_tombstoned_answers_total: "Sign-outs answered 204 from memory for a delete already confirmed.",
 }
 
