@@ -437,6 +437,25 @@ mod tests {
     }
 
     #[test]
+    fn a_renamed_root_stays_claimed() {
+        // Open A, rename A to B, and B must still answer Locked (F3): the registry
+        // keys on the directory's (st_dev, st_ino), not the spelling it was opened
+        // with — under a canonicalize-keyed registry the renamed path canonicalizes
+        // to a NEW string and this assert goes red.
+        let root = temp_root();
+        let renamed = temp_root();
+        let store = ContentStore::open(&root, 1024).unwrap();
+        fs::rename(&root, &renamed).unwrap();
+        assert!(
+            matches!(ContentStore::open(&renamed, 1024), Err(StoreError::Locked)),
+            "the renamed root opened a second store on the same directory"
+        );
+        drop(store);
+        let _store = ContentStore::open(&renamed, 1024).unwrap();
+        fs::remove_dir_all(renamed).unwrap();
+    }
+
+    #[test]
     fn a_duplicated_lock_descriptor_cannot_hold_the_root() {
         // fork() and try_clone() both hand out a second descriptor on the same open
         // file description — under flock() that duplicate kept the lock alive past
