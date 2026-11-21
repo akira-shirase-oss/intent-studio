@@ -903,6 +903,23 @@ starting values; changing one needs a measurement and a new entry.
   fix carries its test; the deploy drill now runs `check-config` against
   a running server and greps the Caddyfile for HSTS.
 
+- **D-068 — Clients idle below the server's head-read bound.** hyper's
+  `header_read_timeout` (`INTENT_HEADER_READ_TIMEOUT_MS`, 10 s) bounds
+  every wait for a request head — including the idle wait on a kept-alive
+  connection — and closes the connection without a response when it
+  fires. A client or proxy pool holding a connection past the bound
+  reuses a dead one and races the close (k6/Go: `readLoopPeekFailLocked`,
+  status 0; a proxy: a 502 for a request the upstream never read). hyper
+  offers no separate idle timer, so the contract lives client-side: the
+  Caddyfile pins `keepalive 5s` in the upstream transport (the deploy
+  test asserts it parses and stays below the configured bound), and the
+  k6 scenarios set `noVUConnectionReuse` — the transport pools for 90 s
+  with no idle knob, so each iteration opens a fresh connection and no
+  reuse can outlive the bound. The connections drill pins the reuse
+  contract the pools rely on: a request sent after the bound sees a
+  whole response, or a clean close before its bytes — never a truncated
+  response mid-request.
+
 ## Open questions (still open)
 
 These need the maintainer or an outside party; each is in the README's

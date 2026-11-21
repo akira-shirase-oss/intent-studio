@@ -39,6 +39,11 @@ const replays = new Counter('lead_replays');
 
 export const options = {
 	discardResponseBodies: false,
+	// The server closes a connection idle for its head-read bound (10 s; D-068) without a
+	// response, and k6's transport pools connections for 90 s — a VU reusing a connection
+	// older than the bound races the close (readLoopPeekFailLocked, status 0). One fresh
+	// connection per iteration keeps every reuse younger than the bound.
+	noVUConnectionReuse: true,
 	scenarios: {
 		leads: {
 			executor: 'constant-arrival-rate',

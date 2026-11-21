@@ -18,6 +18,12 @@ studio.example.com {
 		transport http {
 			read_timeout 40s
 			write_timeout 40s
+			# The server closes a connection idle for its head-read bound (10 s by default;
+			# INTENT_HEADER_READ_TIMEOUT_MS — D-068). A pooled connection older than that is
+			# already dead: reusing it races the close and a request the server never read
+			# gets a 502. 5 s keeps every reuse younger than the bound. Pinned by
+			# scripts/test-deploy.sh.
+			keepalive 5s
 		}
 	}
 

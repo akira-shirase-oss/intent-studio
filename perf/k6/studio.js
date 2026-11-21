@@ -40,6 +40,11 @@ const MAX_DROPPED = Math.max(1, Math.floor(TOTAL * 0.0001));
 if (!PASSWORD) throw new Error('PASSWORD is required');
 
 export const options = {
+	// The server closes a connection idle for its head-read bound (10 s; D-068) without a
+	// response, and k6's transport pools connections for 90 s — a VU reusing a connection
+	// older than the bound races the close (readLoopPeekFailLocked, status 0). One fresh
+	// connection per iteration keeps every reuse younger than the bound.
+	noVUConnectionReuse: true,
 	scenarios: {
 		studio: {
 			executor: 'constant-arrival-rate',

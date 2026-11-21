@@ -115,6 +115,102 @@ async fn slow_headers_and_idle_sockets_are_closed() {
     db.drop_database().await;
 }
 
+/// Reads a complete HTTP/1.1 response (head + `content-length` body) or returns what arrived
+/// before EOF/error/timeout.
+async fn read_response_bytes(stream: &mut tokio::net::TcpStream, limit: Duration) -> Vec<u8> {
+    let start = Instant::now();
+    let mut seen = Vec::new();
+    let mut buf = vec![0_u8; 16 * 1024];
+    loop {
+        let left = limit.saturating_sub(start.elapsed());
+        match tokio::time::timeout(left, stream.read(&mut buf)).await {
+            Ok(Ok(n)) if n > 0 => {
+                seen.extend_from_slice(&buf[..n]);
+                // Complete when the head has arrived and content-length bytes followed.
+                let Some(head) = seen.windows(4).position(|w| w == b"\r\n\r\n") else {
+                    continue;
+                };
+                let head_text = String::from_utf8_lossy(&seen[..head]).to_ascii_lowercase();
+                let Some(length) = head_text.lines().find_map(|l| {
+                    l.strip_prefix("content-length:")?
+                        .trim()
+                        .parse::<usize>()
+                        .ok()
+                }) else {
+                    continue;
+                };
+                if seen.len() >= head + 4 + length {
+                    return seen;
+                }
+            }
+            _ => return seen,
+        }
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "needs the stack: scripts/stack.sh up (run by scripts/drills.sh)"]
+async fn a_reused_idle_connection_gets_a_whole_response_or_a_clean_close() {
+    let db = TestDb::create(1).await;
+    let fixture = ProviderFixture::start(Mode::Ok).await;
+    // The head-read bound is also the idle keep-alive bound (D-068): a client whose pool
+    // holds a connection past it reuses a dead one. The contract every pool relies on is
+    // that the server never truncates a response on this path: a request sent after the
+    // bound sees a whole response, or a clean close before its bytes are read — which is
+    // why keep-alive clients must idle below the bound rather than handle a mid-close.
+    let server = server(&db, &fixture, &[("INTENT_HEADER_READ_TIMEOUT_MS", "600")]).await;
+
+    let mut socket = tokio::net::TcpStream::connect(server.address)
+        .await
+        .unwrap();
+    socket
+        .write_all(b"GET /healthz HTTP/1.1\r\nhost: x\r\n\r\n")
+        .await
+        .unwrap();
+    let first = read_response_bytes(&mut socket, Duration::from_secs(3)).await;
+    assert!(
+        String::from_utf8_lossy(&first).starts_with("HTTP/1.1 200"),
+        "first response incomplete: {}",
+        String::from_utf8_lossy(&first)
+    );
+
+    // Idle well past the 600 ms bound, then reuse the connection.
+    tokio::time::sleep(Duration::from_millis(1200)).await;
+    // The write may fail outright (the FIN landed first) — a clean close, not consumed
+    // bytes. Only a read decides which side of the close we landed on.
+    let _ = socket
+        .write_all(b"GET /healthz HTTP/1.1\r\nhost: x\r\n\r\n")
+        .await;
+    let second = read_response_bytes(&mut socket, Duration::from_secs(3)).await;
+    if !second.is_empty() {
+        let text = String::from_utf8_lossy(&second);
+        assert!(
+            text.starts_with("HTTP/1.1 200"),
+            "the reused connection answered with a partial response (a reset mid-request): {text}"
+        );
+        let head_end = second.windows(4).position(|w| w == b"\r\n\r\n").unwrap();
+        let length: usize = text[..head_end]
+            .to_ascii_lowercase()
+            .lines()
+            .find_map(|l| l.strip_prefix("content-length:")?.trim().parse().ok())
+            .expect("a response without content-length");
+        assert_eq!(
+            second.len() - head_end - 4,
+            length,
+            "truncated body on a reused connection: {text}"
+        );
+    }
+    // Whether the reuse saw a whole response or a clean close, the server still serves a
+    // fresh connection.
+    let health = client()
+        .get(format!("{}/healthz", server.base))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(health.status(), 200);
+    db.drop_database().await;
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[ignore = "needs the stack: scripts/stack.sh up (run by scripts/drills.sh)"]
 async fn open_connections_are_capped() {

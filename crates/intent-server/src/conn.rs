@@ -6,7 +6,10 @@
 //!   descriptor and a task each.
 //! - **Header-read timeout.** hyper's HTTP/1 timer runs whenever a connection waits for a
 //!   request head: a slowloris that trickles headers and a keep-alive socket left idle are both
-//!   closed after it.
+//!   closed after it — without a response. hyper offers no separate idle timer, so a client
+//!   or proxy pool must idle below this bound or its reuses race the close (D-068: the
+//!   deploy transport pins `keepalive 5s`, the k6 scenarios reuse no connection across
+//!   iterations).
 //! - **Write-stall deadline.** A client that stops reading cannot hold a response (and its
 //!   permit) forever: a write that makes no progress for `write_stall` fails the connection.
 //! - **Bounded per connection and per address.** A connection serves at most

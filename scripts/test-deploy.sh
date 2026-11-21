@@ -163,6 +163,19 @@ fi
 
 step "the systemd unit and the Caddyfile"
 grep -q 'Strict-Transport-Security' deploy/Caddyfile || fail "the Caddyfile sets no HSTS header"
+# D-068: hyper's header-read bound also bounds the idle wait on a kept-alive connection and
+# closes it without a response when it fires. An upstream pool that holds a connection past
+# the bound reuses a dead one — a 502 for a request the server never read. The transport's
+# keepalive must stay below INTENT_HEADER_READ_TIMEOUT_MS (10 s default; the env example
+# leaves it unset).
+keepalive="$(sed -nE 's/^[[:space:]]*keepalive[[:space:]]+([0-9]+)s[[:space:]]*$/\1/p' deploy/Caddyfile)"
+[[ $keepalive =~ ^[0-9]+$ ]] \
+    || fail "the Caddyfile pins no upstream keepalive below the server's head-read bound (D-068)"
+bound_ms="$(sed -nE 's/^INTENT_HEADER_READ_TIMEOUT_MS=([0-9]+)$/\1/p' deploy/intent-studio.env.example)"
+bound_ms="${bound_ms:-10000}"
+[[ $bound_ms =~ ^[0-9]+$ ]] || fail "INTENT_HEADER_READ_TIMEOUT_MS is not a number of milliseconds"
+[ "$keepalive" -lt "$((bound_ms / 1000))" ] \
+    || fail "upstream keepalive ${keepalive}s is not below the ${bound_ms} ms head-read bound"
 if command -v systemd-analyze >/dev/null 2>&1; then
     unit="$scratch/intent-studio.service"
     sed -e "s|^ExecStart=.*|ExecStart=$prefix/bin/intent-server serve|" \
