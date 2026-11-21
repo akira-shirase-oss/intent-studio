@@ -99,10 +99,28 @@ fn deny_dumpable() -> anyhow::Result<()> {
         .context("prctl(PR_SET_DUMPABLE)")
 }
 
+/// The shipped-binary probe: `INTENT_PROBE_DUMPABLE=1` reports the flag `main` left and
+/// exits before any configuration is read — deleting `deny_dumpable()` above turns the
+/// integration test's answer red.
+#[cfg(target_os = "linux")]
+const PROBE_DUMPABLE_ENV: &str = "INTENT_PROBE_DUMPABLE";
+
+/// Process-level hardening that must hold before the first byte is read — and the probe
+/// the shipped-binary test uses to prove it happened.
+#[cfg(target_os = "linux")]
+fn harden_process() -> anyhow::Result<()> {
+    deny_dumpable()?;
+    if std::env::var_os(PROBE_DUMPABLE_ENV).is_some() {
+        println!("{:?}", rustix::process::dumpable_behavior()?);
+        std::process::exit(0);
+    }
+    Ok(())
+}
+
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     #[cfg(target_os = "linux")]
-    deny_dumpable()?;
+    harden_process()?;
     match Cli::parse().command.unwrap_or(Command::Serve) {
         Command::Serve => {
             let config = Config::from_env().context("loading configuration")?;
@@ -206,11 +224,13 @@ mod tests {
     #[cfg(target_os = "linux")]
     #[test]
     fn the_process_goes_non_dumpable() {
+        // There is no `Dumpable:` line in /proc/self/status — the flag answers only to
+        // PR_GET_DUMPABLE.
         super::deny_dumpable().unwrap();
-        let status = std::fs::read_to_string("/proc/self/status").unwrap();
-        assert!(
-            status.lines().any(|line| line == "Dumpable:\t0"),
-            "Dumpable did not go to 0"
+        assert_eq!(
+            rustix::process::dumpable_behavior().unwrap(),
+            rustix::process::DumpableBehavior::NotDumpable,
+            "the flag did not go non-dumpable"
         );
     }
 
