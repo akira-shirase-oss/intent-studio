@@ -274,7 +274,7 @@ async fn no_egress_guard_fetches_loopback() {
         .json(&json!({
             "business_name": "mut", "goal": "quote_requests", "intent": "quote",
             "audience": "owners", "services": [{ "name": "s" }],
-            "references": [{ "url": "http://169.254.169.254/latest/meta-data", "permission": "own_content" }],
+            "references": [{ "url": "http://127.0.0.1/latest/meta-data", "permission": "own_content" }],
             "claims": [],
         }))
         .send()
@@ -288,7 +288,9 @@ async fn no_egress_guard_fetches_loopback() {
     // guard off the fetch is attempted — it either reaches the address (201) or fails
     // downstream of the guard (connect/timeout/http_status), and the recorded refusal
     // reason is never `address_forbidden`. Egress still refuses non-default ports, so the
-    // target is the metadata address on its default port 80.
+    // target is a default-port private address: 127.0.0.1 is private to the guard and
+    // refuses instantly — never the real metadata service a cloud runner would reach at
+    // 169.254.169.254.
     let fetched = client
         .post(format!(
             "{}/v1/operator/tenants/{tenant}/briefs/{brief_id}/snapshots",
