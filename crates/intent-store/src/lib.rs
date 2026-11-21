@@ -19,6 +19,7 @@ use std::{
     future::Future,
     io,
     io::Write as _,
+    os::unix::fs::MetadataExt as _,
     path::{Path, PathBuf},
     sync::{Arc, LazyLock, Mutex, MutexGuard},
     time::Duration,
@@ -38,9 +39,14 @@ pub const OPERATION_DEADLINE: Duration = Duration::from_secs(10);
 /// `lock`; that ordering is also what keeps the POSIX close footgun away: any
 /// close by this process of a descriptor on that inode drops all of this
 /// process's locks on it, so a live store's descriptor must be the only one.
-static OPEN_ROOTS: LazyLock<Mutex<HashSet<PathBuf>>> = LazyLock::new(|| Mutex::new(HashSet::new()));
+///
+/// The key is the root's `(st_dev, st_ino)`, never a path spelling: a second
+/// mount point or bind mount of the same directory canonicalizes to a different
+/// path but is still the same directory, and must claim the same store (J).
+static OPEN_ROOTS: LazyLock<Mutex<HashSet<(u64, u64)>>> =
+    LazyLock::new(|| Mutex::new(HashSet::new()));
 
-fn open_roots() -> MutexGuard<'static, HashSet<PathBuf>> {
+fn open_roots() -> MutexGuard<'static, HashSet<(u64, u64)>> {
     OPEN_ROOTS
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner)
@@ -86,8 +92,8 @@ struct Inner {
     /// close on any of this process's descriptors on the inode drops all of
     /// this process's record locks on it.
     lock: Option<fs::File>,
-    /// The canonical root, the `OPEN_ROOTS` key.
-    key: PathBuf,
+    /// The root's `(st_dev, st_ino)`, the `OPEN_ROOTS` key.
+    key: (u64, u64),
 }
 
 impl Drop for Inner {
@@ -102,11 +108,11 @@ impl Drop for Inner {
 
 /// Removes the registry claim on drop unless `disarm` hands it to a store —
 /// the error paths in `open` must not leave a root claimed.
-struct Claim(PathBuf);
+struct Claim((u64, u64));
 
 impl Claim {
-    fn disarm(self) -> PathBuf {
-        let key = self.0.clone();
+    fn disarm(self) -> (u64, u64) {
+        let key = self.0;
         std::mem::forget(self);
         key
     }
@@ -144,8 +150,11 @@ impl ContentStore {
     pub fn open(root: impl Into<PathBuf>, max_blob: usize) -> Result<Self, StoreError> {
         let root = root.into();
         fs::create_dir_all(&root).map_err(StoreError::Io)?;
-        let key = fs::canonicalize(&root).map_err(StoreError::Io)?;
-        if !open_roots().insert(key.clone()) {
+        // `metadata` follows links, so a symlinked spelling claims the same directory; a
+        // bind-mounted spelling canonicalizes elsewhere but still lands here (J).
+        let meta = fs::metadata(&root).map_err(StoreError::Io)?;
+        let key = (meta.dev(), meta.ino());
+        if !open_roots().insert(key) {
             return Err(StoreError::Locked);
         }
         let claimed = Claim(key);
@@ -405,6 +414,26 @@ mod tests {
         let _store = ContentStore::open(&root, 1024).unwrap();
         assert_eq!(fs::read_dir(root.join("tmp")).unwrap().count(), 0);
         fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn a_second_spelling_of_the_same_directory_is_refused() {
+        // The registry keys on (st_dev, st_ino), so a second path to the same directory —
+        // a symlink here, a bind mount in deployment — claims the same store rather than
+        // opening a second one whose drop would release the first's lock (J).
+        let root = temp_root();
+        let link = temp_root();
+        std::os::unix::fs::symlink(&root, &link).unwrap();
+        let store = ContentStore::open(&root, 1024).unwrap();
+        assert!(
+            matches!(ContentStore::open(&link, 1024), Err(StoreError::Locked)),
+            "a second spelling of an open root got its own store"
+        );
+        drop(store);
+        // The claim died with the store: the other spelling opens cleanly now.
+        let _store = ContentStore::open(&link, 1024).unwrap();
+        fs::remove_dir_all(root).unwrap();
+        fs::remove_file(&link).unwrap();
     }
 
     #[test]
