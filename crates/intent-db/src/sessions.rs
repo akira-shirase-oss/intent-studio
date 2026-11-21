@@ -65,14 +65,19 @@ impl Db {
         .map_err(classify)
     }
 
-    /// The addresses that produced a session within `within` — the boot seed for
-    /// the known-address memory, so a restart does not spend the operator's day
-    /// budget reaching for a set the process just forgot (N10).
-    pub async fn recent_signer_addresses(&self, within: Duration) -> Result<Vec<String>, DbError> {
-        sqlx::query_scalar(
-            "SELECT DISTINCT address FROM operator_audit
+    /// The newest addresses that produced a session within `within`, each with its latest
+    /// sign-in time — the boot seed for the known-address memory (N10). The time travels
+    /// with the row so a restart marks `at + window`, never a fresh window, and the LIMIT
+    /// bounds the read (D).
+    pub async fn recent_signer_addresses(
+        &self,
+        within: Duration,
+    ) -> Result<Vec<(String, time::OffsetDateTime)>, DbError> {
+        sqlx::query_as::<_, (String, time::OffsetDateTime)>(
+            "SELECT address, max(at) AS last_at FROM operator_audit
              WHERE action = 'operator.sign_in' AND address IS NOT NULL
-               AND at > now() - $1 * interval '1 second'",
+               AND at > now() - $1 * interval '1 second'
+             GROUP BY address ORDER BY last_at DESC LIMIT 65536",
         )
         .bind(f64::from(
             u32::try_from(within.as_secs()).unwrap_or(u32::MAX),

@@ -204,15 +204,30 @@ async fn restore_session_memory(config: &Config, app: &App) {
         ))
         .await
     {
-        Ok(addresses) => {
-            let count = addresses.len();
+        Ok(rows) => {
+            let count = rows.len();
             let now = app.now_ms();
-            for address in addresses
-                .iter()
-                .filter_map(|a| a.parse::<std::net::IpAddr>().ok())
-            {
-                app.sign_in
-                    .mark_address(intent_domain::ratelimit::AddressKey::of(address), now);
+            let wall_now_ms = u64::try_from(
+                std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap_or_default()
+                    .as_millis(),
+            )
+            .unwrap_or(u64::MAX);
+            for (address, at) in &rows {
+                if let Ok(ip) = address.parse::<std::net::IpAddr>() {
+                    // The seed keeps the audit's own window — `at + window`, never a fresh
+                    // `now + window` — so a restart inside the window ages it out on the
+                    // original clock rather than renewing it forever (D).
+                    let until_ms = u64::try_from(at.unix_timestamp_nanos() / 1_000_000)
+                        .unwrap_or(0)
+                        .saturating_add(crate::operator::KNOWN_ADDRESS_WINDOW_MS);
+                    app.sign_in.mark_address_within(
+                        intent_domain::ratelimit::AddressKey::of(ip),
+                        now,
+                        until_ms.saturating_sub(wall_now_ms),
+                    );
+                }
             }
             tracing::info!(count, "seeded known sign-in addresses");
         }
@@ -230,18 +245,31 @@ async fn drain_sign_out_retries(app: &App) {
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner)
         .take_tasks();
-    if tokio::time::timeout(Duration::from_secs(3), retry_tasks.join_all())
-        .await
-        .is_err()
-        && let pending = app
-            .retries
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .pending_len()
-        && pending > 0
+    let _ = tokio::time::timeout(Duration::from_secs(3), retry_tasks.join_all()).await;
+    // The retry tasks are done — their removals are queued. Closing the channel ends the
+    // writer after its queue flushes, and the last fsync lands before the process goes
+    // away (F).
+    let writer = app
+        .retries
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .take_writer();
+    if let Some(writer) = writer {
+        let _ = tokio::time::timeout(Duration::from_secs(3), writer).await;
+    }
+    if app
+        .retries
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .pending_len()
+        > 0
     {
         tracing::warn!(
-            pending,
+            pending = app
+                .retries
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .pending_len(),
             "sign-out retries unfinished at shutdown — journaled for next boot"
         );
     }
@@ -271,7 +299,7 @@ pub async fn run(config: Config) -> anyhow::Result<ShutdownOutcome> {
         signout_db(&config)?,
         health.clone(),
         studio,
-    );
+    )?;
 
     let cancel = CancellationToken::new();
     let tasks = TaskTracker::new();

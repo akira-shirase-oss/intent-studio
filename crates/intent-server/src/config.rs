@@ -191,6 +191,10 @@ pub struct Config {
     pub cookie_secure: bool,
     /// The built workspace app, served at `/workspace`.
     pub workspace_dir: Option<PathBuf>,
+    /// `INTENT_STATE_DIR`: crash-durable runtime state — the sign-out retry journal —
+    /// independent of the optional content store (E). Default `intent-state` under the
+    /// working directory; production sets it absolute.
+    pub state_dir: PathBuf,
     /// The content store and the asset worker.
     pub studio: StudioConfig,
     /// Log format.
@@ -617,6 +621,10 @@ impl Config {
             );
         }
         let workspace_dir = env.raw("INTENT_WORKSPACE_DIR").map(PathBuf::from);
+        let state_dir = env
+            .raw("INTENT_STATE_DIR")
+            .filter(|v| !v.trim().is_empty())
+            .map_or_else(|| PathBuf::from("intent-state"), PathBuf::from);
         let studio = StudioConfig {
             store_dir: env
                 .raw("INTENT_STORE_DIR")
@@ -691,6 +699,7 @@ impl Config {
                 session_idle,
                 cookie_secure,
                 workspace_dir,
+                state_dir,
                 studio,
                 log_format,
                 log_filter,

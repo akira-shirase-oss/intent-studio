@@ -48,6 +48,16 @@ async fn the_notifier_never_touches_intakes_pool() {
         ("INTENT_NOTIFY_PROVIDER", "recorder".to_owned()),
         ("INTENT_PROFILE", "development".to_owned()),
         ("INTENT_NOTIFY_POLL_MS", "20".to_owned()),
+        (
+            "INTENT_STATE_DIR",
+            std::env::temp_dir()
+                .join(format!(
+                    "intent-notifier-state-{}",
+                    uuid::Uuid::now_v7().simple()
+                ))
+                .display()
+                .to_string(),
+        ),
     ]);
     let config = Config::from_lookup(|key| env.get(key).cloned()).unwrap();
     let short = PoolLimits {
@@ -72,7 +82,8 @@ async fn the_notifier_never_touches_intakes_pool() {
         intake_db,
         health,
         studio,
-    );
+    )
+    .unwrap();
     let recorder = Recorder::default();
     let cancel = CancellationToken::new();
     let running = tokio::spawn(

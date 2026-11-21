@@ -5,7 +5,8 @@
 #![allow(
     clippy::unwrap_used,
     clippy::expect_used,
-    reason = "test code: a failed unwrap is a failed test"
+    clippy::too_many_lines,
+    reason = "test code: a failed unwrap is a failed test; a drill is a linear narrative"
 )]
 
 mod support;
@@ -415,13 +416,14 @@ async fn a_sign_out_the_database_cannot_confirm_stays_revoked_until_the_retry_la
     env.retain(|(k, _)| k != "INTENT_COOKIE_SECURE");
     env.push(("INTENT_OPERATOR_PASSWORD_HASH".into(), hash()));
     env.push(("INTENT_TRUSTED_PROXIES".into(), "127.0.0.1".into()));
-    // The retry journal lives next to the store: this drill proves it writes once.
-    let store_dir = std::env::temp_dir().join(format!(
-        "intent-drill-store-{}",
+    // The retry journal lives in the state directory — no content store is configured,
+    // so this drill also proves the journal is store-independent (E).
+    let state_dir = std::env::temp_dir().join(format!(
+        "intent-drill-state-{}",
         uuid::Uuid::now_v7().simple()
     ));
-    std::fs::create_dir_all(&store_dir).unwrap();
-    env.push(("INTENT_STORE_DIR".into(), store_dir.display().to_string()));
+    std::fs::create_dir_all(&state_dir).unwrap();
+    env.push(("INTENT_STATE_DIR".into(), state_dir.display().to_string()));
     let server = Server::start(env).await;
     let client = client();
     let cookie = sign_in(&client, &server.base, PASSWORD, "10.81.0.1", "req-lock").await;
@@ -476,7 +478,8 @@ async fn a_sign_out_the_database_cannot_confirm_stays_revoked_until_the_retry_la
     );
     // A second sign-out of the same digest is answered from the retry's memory —
     // no second task, no second slot in the journal, no queue on the one
-    // connection (NEW-1). The journal file is the proof: exactly one 32-byte record.
+    // connection (NEW-1). Status alone cannot tell the memory answer from the
+    // locked-row 503, so the counter is the assertion that can go red (H).
     let again = client
         .delete(&session)
         .header("cookie", &cookie)
@@ -488,13 +491,25 @@ async fn a_sign_out_the_database_cannot_confirm_stays_revoked_until_the_retry_la
         503,
         "a pending retry's repeat was not answered from memory"
     );
-    let journal = store_dir.join("signout-pending.journal");
+    let journal = state_dir.join("signout-pending.journal");
     assert_eq!(
         std::fs::metadata(&journal)
-            .expect("no retry journal beside the store")
+            .expect("no retry journal in the state directory")
             .len(),
         32,
         "the journal must hold exactly one digest record"
+    );
+    let metrics = client
+        .get(format!("{}/metrics", server.base))
+        .send()
+        .await
+        .unwrap()
+        .text()
+        .await
+        .unwrap();
+    assert!(
+        metrics.contains("intent_signout_pending_answers_total 1\n"),
+        "the memory answer was not counted — delete its path and this assertion goes red"
     );
 
     // Free the row: the tracked retry must finish the delete without another request.
@@ -515,6 +530,38 @@ async fn a_sign_out_the_database_cannot_confirm_stays_revoked_until_the_retry_la
     }
     assert!(gone, "the background retry never deleted the row");
     assert_eq!(valid().send().await.unwrap().status(), 401);
+    // The confirmed delete is answered from the tombstone's memory: a thief looping the
+    // revoked cookie gets no uncharged DELETE on the one connection — and the counter is
+    // what proves the DB was never asked (H). The row's deletion is observed a hair
+    // before `pending` drops the digest, so the answer can still be a pending 503 for
+    // a moment — poll for the tombstone answer.
+    let mut settled_status = 503;
+    for _ in 0..40 {
+        let settled = client
+            .delete(&session)
+            .header("cookie", &cookie)
+            .send()
+            .await
+            .unwrap();
+        settled_status = settled.status().as_u16();
+        if settled_status == 204 {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    assert_eq!(settled_status, 204);
+    let metrics = client
+        .get(format!("{}/metrics", server.base))
+        .send()
+        .await
+        .unwrap()
+        .text()
+        .await
+        .unwrap();
+    assert!(
+        metrics.contains("intent_signout_tombstoned_answers_total 1\n"),
+        "a confirmed delete hit the database again — the memory answer was not counted"
+    );
     db.drop_database().await;
 }
 
@@ -529,12 +576,14 @@ async fn a_restart_resumes_the_sign_out_retry_from_its_journal() {
     env.retain(|(k, _)| k != "INTENT_COOKIE_SECURE");
     env.push(("INTENT_OPERATOR_PASSWORD_HASH".into(), hash()));
     env.push(("INTENT_TRUSTED_PROXIES".into(), "127.0.0.1".into()));
-    let store_dir = std::env::temp_dir().join(format!(
-        "intent-drill-store-{}",
+    // The state directory, not the content store — this restart proves the journal
+    // works with no store configured at all (E).
+    let state_dir = std::env::temp_dir().join(format!(
+        "intent-drill-state-{}",
         uuid::Uuid::now_v7().simple()
     ));
-    std::fs::create_dir_all(&store_dir).unwrap();
-    env.push(("INTENT_STORE_DIR".into(), store_dir.display().to_string()));
+    std::fs::create_dir_all(&state_dir).unwrap();
+    env.push(("INTENT_STATE_DIR".into(), state_dir.display().to_string()));
     let mut server = Server::start(env).await;
     let client = client();
     let cookie = sign_in(&client, &server.base, PASSWORD, "10.82.0.1", "req-restart").await;
@@ -568,7 +617,7 @@ async fn a_restart_resumes_the_sign_out_retry_from_its_journal() {
         .unwrap();
     assert_eq!(out.status(), 503);
     assert_eq!(
-        std::fs::metadata(store_dir.join("signout-pending.journal"))
+        std::fs::metadata(state_dir.join("signout-pending.journal"))
             .expect("the debt was never journaled")
             .len(),
         32
@@ -607,5 +656,62 @@ async fn a_restart_resumes_the_sign_out_retry_from_its_journal() {
     }
     assert!(gone, "the resumed retry never deleted the row");
     assert_eq!(valid().send().await.unwrap().status(), 401);
+    db.drop_database().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "needs the stack: scripts/stack.sh up (run by scripts/drills.sh)"]
+async fn a_restart_does_not_renew_a_known_address_window() {
+    // A boot seed must carry the audit's own window — at + 30d — never a fresh
+    // now + 30d: under the bug every restart keeps an address known forever, and a
+    // thief's address survives the password rotation that was meant to evict it (D).
+    // The injected clock is the audit row itself: written at the window's very edge,
+    // inside it at seed time and out of it seconds later.
+    let db = TestDb::create(1).await;
+    let fixture = ProviderFixture::start(Mode::Ok).await;
+    let mut env = drill_env(&db, &fixture.url);
+    env.retain(|(k, _)| k != "INTENT_COOKIE_SECURE");
+    env.push(("INTENT_OPERATOR_PASSWORD_HASH".into(), hash()));
+    env.push(("INTENT_TRUSTED_PROXIES".into(), "127.0.0.1".into()));
+    let mut conn = db.connect().await;
+    sqlx::query(
+        "INSERT INTO operator_audit (action, address, at)
+         VALUES ('operator.sign_in', '10.83.9.9', now() - interval '30 days' + interval '8 seconds')",
+    )
+    .execute(&mut conn)
+    .await
+    .unwrap();
+    let server = Server::start(env).await; // the boot seeds the address's remaining ~8 s
+    let client = client();
+    // The audit's own window passes: under `now + window` the address stays known for
+    // 30 more days; under `at + window` it is gone.
+    tokio::time::sleep(Duration::from_secs(10)).await;
+    // Past the window the address pays the shared minute again — five wrong passwords
+    // spend it, and the sixth try (the right password) is refused (D). Were the address
+    // still 'known', each try would spend its day budget and this one would sign in.
+    for attempt in 0..5 {
+        let bad = sign_in(
+            &client,
+            &server.base,
+            "a wrong password",
+            "10.83.9.9",
+            &format!("req-window-{attempt}"),
+        )
+        .await;
+        assert_eq!(bad.status(), 401);
+    }
+    let right = sign_in(
+        &client,
+        &server.base,
+        PASSWORD,
+        "10.83.9.9",
+        "req-window-right",
+    )
+    .await;
+    assert_eq!(
+        right.status(),
+        429,
+        "the restart renewed the window — the address kept its day budget"
+    );
     db.drop_database().await;
 }

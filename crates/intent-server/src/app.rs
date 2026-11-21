@@ -109,16 +109,13 @@ impl App {
         signout_db: Db,
         health: Health,
         studio: Studio,
-    ) -> Self {
-        // The journal sits next to the store's bytes: pending sign-out deletes survive
-        // a restart through it (NEW-1). Without a store the journal is skipped — the
-        // retry set still works in memory.
-        let journal = config
-            .studio
-            .store_dir
-            .as_ref()
-            .map(|dir| dir.join("signout-pending.journal"));
-        Self(Arc::new(Inner {
+    ) -> std::io::Result<Self> {
+        // The journal lives in the state directory — independent of the optional content
+        // store — so pending sign-out deletes survive a restart through it (NEW-1, E).
+        // An unreadable or oversized journal refuses the boot rather than dropping debt.
+        let journal = config.state_dir.join("signout-pending.journal");
+        let retries = crate::operator::Retries::open(Some(journal))?;
+        Ok(Self(Arc::new(Inner {
             gate: Arc::new(Semaphore::new(config.max_in_flight)),
             address_limiter: Limiter::new(config.address_quota, config.rate_table_entries),
             site_limiter: Limiter::new(config.site_quota, config.rate_table_entries),
@@ -134,11 +131,9 @@ impl App {
             db,
             sessions,
             signout_db,
-            retries: Arc::new(std::sync::Mutex::new(crate::operator::Retries::open(
-                journal,
-            ))),
+            retries: Arc::new(std::sync::Mutex::new(retries)),
             health,
-        }))
+        })))
     }
 
     /// Milliseconds on the process's monotonic clock (for token buckets).
