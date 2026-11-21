@@ -30,12 +30,12 @@ impl Db {
         digest: &[u8; 32],
         idle: Duration,
     ) -> Result<Option<f64>, DbError> {
+        // extract(epoch …) is `numeric` on Postgres ≥14 — sqlx maps f64 to FLOAT8 only,
+        // so without the cast every row fails to decode (N15).
         sqlx::query_scalar(
             "UPDATE operator_sessions SET last_seen_at = now()
              WHERE token_digest = $1 AND expires_at > now()
                AND last_seen_at > now() - $2 * interval '1 second'
-             // extract(epoch …) is `numeric` on Postgres ≥14 — sqlx maps f64 to FLOAT8 only,
-             // so without the cast every row fails to decode (N15).
              RETURNING extract(epoch from expires_at - now())::float8",
         )
         .bind(digest.as_slice())
@@ -61,6 +61,23 @@ impl Db {
             u32::try_from(within.as_secs()).unwrap_or(u32::MAX),
         ))
         .fetch_one(&self.pool)
+        .await
+        .map_err(classify)
+    }
+
+    /// The addresses that produced a session within `within` — the boot seed for
+    /// the known-address memory, so a restart does not spend the operator's day
+    /// budget reaching for a set the process just forgot (N10).
+    pub async fn recent_signer_addresses(&self, within: Duration) -> Result<Vec<String>, DbError> {
+        sqlx::query_scalar(
+            "SELECT DISTINCT address FROM operator_audit
+             WHERE action = 'operator.sign_in' AND address IS NOT NULL
+               AND at > now() - $1 * interval '1 second'",
+        )
+        .bind(f64::from(
+            u32::try_from(within.as_secs()).unwrap_or(u32::MAX),
+        ))
+        .fetch_all(&self.pool)
         .await
         .map_err(classify)
     }
