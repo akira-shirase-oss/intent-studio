@@ -117,16 +117,27 @@ fn harden_process() -> anyhow::Result<()> {
     Ok(())
 }
 
+/// `intent-server` — the deployed form: config, telemetry, then the server.
+async fn run_server() -> anyhow::Result<()> {
+    let config = Config::from_env().context("loading configuration")?;
+    telemetry::init(config.log_format, &config.log_filter).context("starting telemetry")?;
+    #[cfg(feature = "mutation-seams")]
+    if let Some(mutation) = config.mutation {
+        tracing::warn!(
+            ?mutation,
+            "INTENT_MUTATION is active: a protection is switched off — this build must never ship"
+        );
+    }
+    serve::run(config).await?;
+    Ok(())
+}
+
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     #[cfg(target_os = "linux")]
     harden_process()?;
     match Cli::parse().command.unwrap_or(Command::Serve) {
-        Command::Serve => {
-            let config = Config::from_env().context("loading configuration")?;
-            telemetry::init(config.log_format, &config.log_filter).context("starting telemetry")?;
-            serve::run(config).await?;
-        }
+        Command::Serve => run_server().await?,
         Command::CheckConfig => {
             let config = match Config::from_env() {
                 Ok(config) => config,

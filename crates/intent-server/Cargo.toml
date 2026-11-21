@@ -59,7 +59,7 @@ default = []
 # Compiles the INTENT_MUTATION seams the attack suite's mutation proofs exercise.
 # Development and the drill harness only — a shipped build must never carry them
 # (scripts/check.sh strings-checks the release binary).
-mutation-seams = []
+mutation-seams = ["intent-egress/mutation-seams"]
 
 [lints]
 workspace = true

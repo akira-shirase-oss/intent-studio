@@ -18,6 +18,11 @@ tokio-rustls.workspace = true
 url.workspace = true
 webpki-roots.workspace = true
 
+[features]
+default = []
+# The SSRF bypass the mutation proof exercises — absent from every shipped build.
+mutation-seams = []
+
 [dev-dependencies]
 hyper = { workspace = true, features = ["server", "client"] }
 

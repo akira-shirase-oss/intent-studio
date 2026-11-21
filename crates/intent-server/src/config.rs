@@ -85,6 +85,8 @@ pub enum Mutation {
     NoEgressGuard,
     /// Every lead insert dedupes nothing.
     NoLeadDedup,
+    /// `sign_in` mints the client-named token instead of a random one.
+    ClientSessionToken,
 }
 
 /// Which notification provider adapter to use.
@@ -362,9 +364,10 @@ impl Config {
             Some("no-content-type") => Some(Mutation::NoContentType),
             Some("no-egress-guard") => Some(Mutation::NoEgressGuard),
             Some("no-lead-dedup") => Some(Mutation::NoLeadDedup),
+            Some("client-session-token") => Some(Mutation::ClientSessionToken),
             Some(other) => {
                 env.problems.push(format!(
-                    "INTENT_MUTATION: expected one of no-session-check, no-session-delete, trust-any-forwarded, no-metrics-token, no-request-bound, no-content-type, no-egress-guard, no-lead-dedup; got {other:?}"
+                    "INTENT_MUTATION: expected one of no-session-check, no-session-delete, trust-any-forwarded, no-metrics-token, no-request-bound, no-content-type, no-egress-guard, no-lead-dedup, client-session-token; got {other:?}"
                 ));
                 None
             }

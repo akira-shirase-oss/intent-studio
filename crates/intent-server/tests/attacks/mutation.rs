@@ -109,7 +109,12 @@ async fn trust_any_forwarded_moves_the_limiter() {
 async fn no_metrics_token_opens_metrics() {
     let db = TestDb::create(1).await;
     let fixture = ProviderFixture::start(Mode::Ok).await;
-    let server = mutated(&db, &fixture.url, "no-metrics-token", false).await;
+    // A token is configured so the guard is real: without the seam the request is 401 (M1).
+    let mut env = drill_env(&db, &fixture.url);
+    env.retain(|(k, _)| k != "INTENT_COOKIE_SECURE");
+    env.push(("INTENT_MUTATION".into(), "no-metrics-token".into()));
+    env.push(("INTENT_METRICS_TOKEN".into(), "proof-metrics-token".into()));
+    let server = Server::start(env).await;
     let client = client();
     let status = client
         .get(format!("{}/metrics", server.base))
@@ -197,7 +202,10 @@ async fn no_content_type_accepts_a_form() {
         .await
         .unwrap()
         .status();
-    assert_ne!(status, 415, "the form post was still refused as media");
+    assert_eq!(
+        status, 400,
+        "with the media check off the form reaches the JSON parser: {status}"
+    );
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -269,10 +277,15 @@ async fn no_egress_guard_fetches_loopback() {
         .send()
         .await
         .unwrap();
-    assert_ne!(
+    assert_eq!(
         fetched.status(),
-        422,
+        201,
         "the egress guard still refused a private address"
+    );
+    let stored = fetched.json::<Value>().await.unwrap();
+    assert!(
+        stored["id"].as_str().is_some_and(|id| !id.is_empty()),
+        "no snapshot row for the fetched private address: {stored}"
     );
 }
 
@@ -300,4 +313,80 @@ async fn no_lead_dedup_stores_every_retry() {
     let leads = db.leads_with_prefix("m").await;
     let stored: usize = leads.values().map(Vec::len).sum();
     assert_eq!(stored, 3, "dedup still merged them: {leads:?}");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "needs the stack: scripts/stack.sh up (run by scripts/drills.sh)"]
+async fn no_content_type_accepts_a_bare_withdrawal() {
+    let db = TestDb::create(1).await;
+    let fixture = ProviderFixture::start(Mode::Ok).await;
+    let server = mutated(&db, &fixture.url, "no-content-type", true).await;
+    let client = client();
+    let response = client
+        .post(format!("{}/v1/operator/session", server.base))
+        .json(&json!({ "password": auth::PASSWORD }))
+        .send()
+        .await
+        .unwrap();
+    let cookie = response.headers()["set-cookie"]
+        .to_str()
+        .unwrap()
+        .split(';')
+        .next()
+        .unwrap()
+        .to_owned();
+    // The CSRF attack asserts the marker is required: a bare POST carries neither
+    // application/json nor x-intent, so guarded it dies 415; with the seam on it reaches
+    // the handler and fails only because the fact is unknown — 404, not a media refusal.
+    let status = client
+        .post(format!(
+            "{}/v1/operator/tenants/00000000-0000-0000-0000-000000000000/facts/00000000-0000-0000-0000-000000000000/withdrawal",
+            server.base
+        ))
+        .header("cookie", &cookie)
+        .send()
+        .await
+        .unwrap()
+        .status();
+    assert_eq!(status, 404, "the CSRF marker was still enforced: {status}");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "needs the stack: scripts/stack.sh up (run by scripts/drills.sh)"]
+async fn client_session_token_issues_the_client_chosen_token() {
+    let db = TestDb::create(1).await;
+    let fixture = ProviderFixture::start(Mode::Ok).await;
+    let server = mutated(&db, &fixture.url, "client-session-token", true).await;
+    let client = client();
+    let chosen = "b".repeat(64);
+    // The token-choice attack asserts the mint ignores a client field; with the seam on the
+    // response carries exactly the token the client named — proof the guard was real.
+    let response = client
+        .post(format!("{}/v1/operator/session", server.base))
+        .json(&json!({ "password": auth::PASSWORD, "session": chosen }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status(), 200);
+    let cookie = response.headers()["set-cookie"]
+        .to_str()
+        .unwrap()
+        .to_owned();
+    let issued = cookie.split('=').nth(1).and_then(|v| v.split(';').next());
+    assert_eq!(
+        issued,
+        Some(chosen.as_str()),
+        "the mint ignored the client token"
+    );
+    let replay = client
+        .get(format!("{}/v1/operator/leads", server.base))
+        .header("cookie", cookie.split(';').next().unwrap())
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(
+        replay.status(),
+        200,
+        "the chosen token did not open the session"
+    );
 }

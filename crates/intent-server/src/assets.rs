@@ -190,6 +190,7 @@ pub async fn upload(
     let detail = json!({
         "tenant": tenant, "asset": id, "kind": kind.as_str(),
         "bytes": original_bytes, "removed_parts": processed.removed_parts,
+        "dropped_parts": processed.dropped_parts,
     })
     .to_string();
     let media_type_text = media_type.unwrap_or_else(|| "application/octet-stream".into());
@@ -421,12 +422,17 @@ pub async fn fetch_snapshot(
         .ok_or(ApiError::NotFound)?;
 
     // Outside any transaction (invariant 2): the guard decides, then the outcome is recorded.
-    let outcome = if crate::mutated!(app.config, crate::config::Mutation::NoEgressGuard) {
-        app.studio
-            .egress
-            .fetch_unchecked(&reference.url, Purpose::Page)
-            .await
-    } else {
+    let outcome = {
+        #[cfg(feature = "mutation-seams")]
+        if crate::mutated!(app.config, crate::config::Mutation::NoEgressGuard) {
+            app.studio
+                .egress
+                .fetch_unchecked(&reference.url, Purpose::Page)
+                .await
+        } else {
+            app.studio.egress.fetch(&reference.url, Purpose::Page).await
+        }
+        #[cfg(not(feature = "mutation-seams"))]
         app.studio.egress.fetch(&reference.url, Purpose::Page).await
     };
     let id = SnapshotId::from_uuid(Uuid::now_v7());

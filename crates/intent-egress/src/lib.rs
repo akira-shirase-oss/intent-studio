@@ -255,9 +255,10 @@ impl<R: Resolve, C: Connect> Guard<R, C> {
     }
 
     /// The same fetch with the per-address policy skipped — it exists so the mutation
-    /// proof can show the SSRF attack landing without the guard. Production callers use
-    /// [`fetch`](Self::fetch); nothing else may call this.
+    /// proof can show the SSRF attack landing without the guard. It is compiled only under
+    /// the `mutation-seams` feature: no shipped build can even name an unguarded fetch.
     #[doc(hidden)]
+    #[cfg(feature = "mutation-seams")]
     pub async fn fetch_unchecked(&self, raw: &str, purpose: Purpose) -> Result<Fetched, Refusal> {
         tokio::time::timeout(self.deadline, self.fetch_unbounded(raw, purpose, false))
             .await
